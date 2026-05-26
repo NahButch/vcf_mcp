@@ -1,0 +1,7 @@
+﻿# Override the user's $env:CARGO_TARGET_DIR for this project.
+#
+# Note: an env var still takes precedence over this file. In a shell that
+# already has CARGO_TARGET_DIR set, either clear it (`$env:CARGO_TARGET_DIR
+# = ''`) or pass `--target-dir target` on the command line.
+[build]
+target-dir = "target"
