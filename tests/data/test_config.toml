@@ -1,0 +1,14 @@
+# Test fixture config for vcf-mcp.
+#
+# vcf_path is resolved relative to the directory containing this file, so the
+# test runner can resolve it without hardcoding an absolute path.
+#
+# The slice was cut from the GIAB NA12878 / HG001 v4.2.1 GRCh38 benchmark VCF
+# (https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/NA12878_HG001/latest/GRCh38/)
+# at chr17:50100000-50300000 — the COL1A1 region. 279 records.
+
+[[samples]]
+name = "NA12878"
+vcf_path = "na12878_chr17_slice.vcf.gz"
+build = "GRCh38"
+description = "GIAB NA12878 v4.2.1 chr17:50100000-50300000 (COL1A1 region) slice"

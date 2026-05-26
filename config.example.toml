@@ -1,0 +1,31 @@
+# vcf-mcp configuration
+#
+# Each [[samples]] entry registers a VCF file that the MCP server can query.
+# All paths must be absolute, point to a bgzipped VCF (.vcf.gz), and have a
+# matching tabix index (.vcf.gz.tbi) sitting next to the data file.
+#
+# Copy this file to the OS-specific config location and edit:
+#   Linux:   ~/.config/vcf-mcp/config.toml
+#   macOS:   ~/Library/Application Support/vcf-mcp/config.toml
+#   Windows: %APPDATA%\vcf-mcp\config.toml
+#
+# Or pass --config <path> on the command line.
+
+[[samples]]
+# Short, stable identifier the MCP client uses to refer to this sample.
+name = "NA12878"
+
+# Absolute path to a bgzipped VCF. A companion .vcf.gz.tbi must exist alongside.
+vcf_path = "/data/giab/HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+
+# Genome build. Must be exactly "GRCh37" or "GRCh38".
+build = "GRCh38"
+
+# Free-text description shown to MCP clients in tool responses.
+description = "GIAB NA12878 / HG001 benchmark calls, v4.2.1, chromosomes 1-22"
+
+[[samples]]
+name = "patient_001"
+vcf_path = "/data/cohort/patient_001.somatic.vcf.gz"
+build = "GRCh37"
+description = "Example somatic call set"

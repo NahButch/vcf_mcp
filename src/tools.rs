@@ -1,0 +1,120 @@
+use std::sync::Arc;
+
+use rmcp::{
+    ErrorData as McpError, ServerHandler,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{
+        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    },
+    schemars, tool, tool_handler, tool_router,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, Sample};
+use crate::error::Error;
+use crate::vcf::{self, QueryRegionArgs};
+
+#[derive(Clone)]
+pub struct VcfServer {
+    config: Arc<Config>,
+    // Populated and read by the #[tool_router] / #[tool_handler] proc-macros.
+    #[allow(dead_code)]
+    tool_router: ToolRouter<VcfServer>,
+}
+
+#[derive(Serialize)]
+struct SampleSummary<'a> {
+    name: &'a str,
+    build: &'a str,
+    description: &'a str,
+}
+
+impl<'a> From<&'a Sample> for SampleSummary<'a> {
+    fn from(s: &'a Sample) -> Self {
+        SampleSummary {
+            name: &s.name,
+            build: &s.build,
+            description: &s.description,
+        }
+    }
+}
+
+#[tool_router]
+impl VcfServer {
+    pub fn new(config: Arc<Config>) -> Self {
+        Self {
+            config,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "List the VCF samples configured on this server.")]
+    async fn list_samples(&self) -> Result<CallToolResult, McpError> {
+        let summaries: Vec<SampleSummary<'_>> = self
+            .config
+            .samples
+            .iter()
+            .map(SampleSummary::from)
+            .collect();
+        let payload = serde_json::to_string(&summaries)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
+        description = "Return variant calls overlapping a chromosome region. Coordinates are 1-based inclusive. Chromosome may be given with or without the 'chr' prefix; the server normalizes to the file's convention. Multi-allelic ALTs are comma-separated. The result is capped at 500 records; when more would match, `truncated` is true."
+    )]
+    async fn query_region(
+        &self,
+        Parameters(args): Parameters<QueryRegionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = vcf::query_region(
+            self.config.clone(),
+            QueryRegionArgs {
+                sample: args.sample,
+                chrom: args.chrom,
+                start: args.start,
+                end: args.end,
+            },
+        )
+        .await
+        .map_err(map_domain_error)?;
+        let payload = serde_json::to_string(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct QueryRegionParams {
+    /// Sample name as configured on the server.
+    pub sample: String,
+    /// Chromosome, with or without 'chr' prefix (e.g. "17" or "chr17").
+    pub chrom: String,
+    /// 1-based inclusive start position.
+    pub start: u32,
+    /// 1-based inclusive end position.
+    pub end: u32,
+}
+
+fn map_domain_error(e: Error) -> McpError {
+    match e {
+        Error::SampleNotFound(_)
+        | Error::InvalidChromosome { .. }
+        | Error::InvalidRange { .. }
+        | Error::RegionTooLarge { .. } => McpError::invalid_params(e.to_string(), None),
+        _ => McpError::internal_error(e.to_string(), None),
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for VcfServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions(
+                "VCF query MCP server. Use list_samples to discover available samples.",
+            )
+    }
+}

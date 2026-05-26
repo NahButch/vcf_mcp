@@ -1,0 +1,33 @@
+# Rust build output
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local config (may contain absolute paths to user data)
+/config.toml
+config.local.toml
+
+# Downloaded reference / test data (committed slices are kept; large dumps ignored)
+/data/
+*.vcf.gz
+*.vcf.gz.tbi
+*.gtf.gz
+!tests/data/**/*.vcf.gz
+!tests/data/**/*.vcf.gz.tbi
+
+# Coverage / profiling
+*.profraw
+tarpaulin-report.html
+cobertura.xml
+
+# Env files
+.env
+.env.local
