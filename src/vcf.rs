@@ -1,7 +1,12 @@
 use std::borrow::Cow;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufRead;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
+use noodles_bgzf as bgzf;
 use noodles_core::{Position, Region};
 use noodles_vcf::{
     self as vcf,
@@ -22,6 +27,7 @@ use crate::error::{Error, Result};
 const MAX_REGION_BP: u64 = 10_000_000;
 const MAX_RECORDS: usize = 500;
 const QUERY_TIMEOUT_SECS: u64 = 30;
+const MAX_RSIDS_PER_LOOKUP: usize = 100;
 
 #[derive(Debug, Serialize)]
 pub struct VariantRecord {
@@ -191,12 +197,18 @@ fn extract_variant(
         .ok_or_else(|| "record missing variant_start".to_string())? as u32;
     let ref_bases = rec.reference_bases().to_string();
 
+    // gVCF reference-call records have no ALT (file shows "."), which noodles
+    // surfaces as an empty iterator — emit "." rather than an ambiguous "".
     let alt = {
         let mut alts: Vec<String> = Vec::new();
         for r in rec.alternate_bases().iter() {
             alts.push(r.map_err(|e| e.to_string())?.to_string());
         }
-        alts.join(",")
+        if alts.is_empty() {
+            ".".to_string()
+        } else {
+            alts.join(",")
+        }
     };
 
     let rsid = match rec.ids().iter().next() {
@@ -304,6 +316,254 @@ fn compute_genotype_alleles(gt: &str, ref_bases: &str, alt_csv: &str) -> String 
     out
 }
 
+// ---------- lookup_rsids ----------
+
+#[derive(Debug, Clone)]
+pub struct RsidLocation {
+    pub chrom: String,
+    pub pos: u32,
+}
+
+pub type RsidIndex = HashMap<String, RsidLocation>;
+
+#[derive(Default)]
+pub struct RsidCache {
+    inner: RwLock<HashMap<String, Arc<RsidIndex>>>,
+}
+
+impl RsidCache {
+    pub fn get(&self, sample: &str) -> Option<Arc<RsidIndex>> {
+        self.inner.read().ok()?.get(sample).cloned()
+    }
+    pub fn set(&self, sample: String, idx: Arc<RsidIndex>) {
+        if let Ok(mut w) = self.inner.write() {
+            w.insert(sample, idx);
+        }
+    }
+    #[allow(dead_code)] // used by tests; useful for diagnostics
+    pub fn has(&self, sample: &str) -> bool {
+        self.inner
+            .read()
+            .map(|r| r.contains_key(sample))
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LookupRsidsArgs {
+    pub sample: String,
+    pub rsids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LookupRsidEntry {
+    pub rsid: String,
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<VariantRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LookupRsidsResponse {
+    pub sample: String,
+    pub count: usize,
+    pub found_count: usize,
+    pub results: Vec<LookupRsidEntry>,
+}
+
+pub async fn lookup_rsids(
+    cfg: Arc<Config>,
+    cache: Arc<RsidCache>,
+    args: LookupRsidsArgs,
+) -> Result<LookupRsidsResponse> {
+    if args.rsids.is_empty() {
+        return Err(Error::EmptyRsidList);
+    }
+    if args.rsids.len() > MAX_RSIDS_PER_LOOKUP {
+        return Err(Error::TooManyRsids {
+            count: args.rsids.len(),
+            max: MAX_RSIDS_PER_LOOKUP,
+        });
+    }
+
+    let sample = cfg
+        .samples
+        .iter()
+        .find(|s| s.name == args.sample)
+        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?
+        .clone();
+
+    let idx = ensure_rsid_index(&cache, &sample).await?;
+
+    let vcf_path = sample.vcf_path.clone();
+    let rsids = args.rsids.clone();
+    let work =
+        tokio::task::spawn_blocking(move || lookup_rsids_blocking(&sample.vcf_path, &idx, &rsids));
+    let results = match tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), work).await {
+        Err(_) => {
+            return Err(Error::QueryTimeout {
+                secs: QUERY_TIMEOUT_SECS,
+            });
+        }
+        Ok(Err(e)) => {
+            return Err(Error::VcfRead {
+                path: vcf_path,
+                message: format!("blocking task panicked: {e}"),
+            });
+        }
+        Ok(Ok(r)) => r?,
+    };
+
+    let found_count = results.iter().filter(|e| e.found).count();
+    Ok(LookupRsidsResponse {
+        sample: args.sample,
+        count: results.len(),
+        found_count,
+        results,
+    })
+}
+
+async fn ensure_rsid_index(cache: &RsidCache, sample: &Sample) -> Result<Arc<RsidIndex>> {
+    if let Some(idx) = cache.get(&sample.name) {
+        return Ok(idx);
+    }
+    let path = sample.vcf_path.clone();
+    let started = Instant::now();
+    let result = tokio::task::spawn_blocking(move || build_rsid_index(&path))
+        .await
+        .map_err(|e| Error::VcfRead {
+            path: sample.vcf_path.clone(),
+            message: format!("cache build panicked: {e}"),
+        })?
+        .map_err(|e| Error::VcfRead {
+            path: sample.vcf_path.clone(),
+            message: format!("cache build failed: {e}"),
+        })?;
+    let entries = result.len();
+    let elapsed = started.elapsed();
+    tracing::info!(
+        sample = %sample.name,
+        entries = entries,
+        elapsed_ms = elapsed.as_millis() as u64,
+        "built rsid cache"
+    );
+    let arc = Arc::new(result);
+    cache.set(sample.name.clone(), arc.clone());
+    Ok(arc)
+}
+
+// VCFs have no rsid index, so the only way to map rs→position is to stream the
+// whole file once. Bgzf reads + line-level parsing of CHROM/POS/ID is fast: a
+// 12M-record WGS file completes in a few seconds. We deliberately skip the
+// full noodles record parser here — only the first three columns matter.
+fn build_rsid_index(path: &Path) -> std::io::Result<RsidIndex> {
+    let mut reader = bgzf::io::Reader::new(File::open(path)?);
+    let mut idx = HashMap::new();
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        if reader.read_line(&mut buf)? == 0 {
+            break;
+        }
+        if buf.starts_with('#') {
+            continue;
+        }
+        let mut it = buf.splitn(4, '\t');
+        let chrom = match it.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        let pos_str = match it.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        let id_field = match it.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        if id_field == "." || id_field.is_empty() {
+            continue;
+        }
+        let pos: u32 = match pos_str.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // The ID column may contain multiple ;-separated IDs.
+        for id in id_field.split(';') {
+            if id.starts_with("rs") {
+                idx.insert(
+                    id.to_string(),
+                    RsidLocation {
+                        chrom: chrom.to_string(),
+                        pos,
+                    },
+                );
+            }
+        }
+    }
+    Ok(idx)
+}
+
+fn lookup_rsids_blocking(
+    vcf_path: &Path,
+    idx: &RsidIndex,
+    rsids: &[String],
+) -> Result<Vec<LookupRsidEntry>> {
+    let mut reader = vcf::io::indexed_reader::Builder::default()
+        .build_from_path(vcf_path)
+        .map_err(|source| Error::VcfOpen {
+            path: vcf_path.to_path_buf(),
+            source,
+        })?;
+    let header = reader.read_header().map_err(|e| Error::VcfRead {
+        path: vcf_path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+
+    let mut out = Vec::with_capacity(rsids.len());
+    for rsid in rsids {
+        let Some(loc) = idx.get(rsid) else {
+            out.push(LookupRsidEntry {
+                rsid: rsid.clone(),
+                found: false,
+                variant: None,
+            });
+            continue;
+        };
+
+        let pos = Position::try_from(loc.pos as usize).map_err(|_| Error::VcfRead {
+            path: vcf_path.to_path_buf(),
+            message: format!("invalid cached position for {rsid}"),
+        })?;
+        let region = Region::new(loc.chrom.as_str(), pos..=pos);
+        let query = reader.query(&header, &region).map_err(|e| Error::VcfRead {
+            path: vcf_path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        let mut matched: Option<VariantRecord> = None;
+        for r in query.records() {
+            let rec = r.map_err(|e| Error::VcfRead {
+                path: vcf_path.to_path_buf(),
+                message: e.to_string(),
+            })?;
+            let v = extract_variant(&header, &rec).map_err(|e| Error::VcfRead {
+                path: vcf_path.to_path_buf(),
+                message: e,
+            })?;
+            if v.rsid.as_deref() == Some(rsid.as_str()) {
+                matched = Some(v);
+                break;
+            }
+        }
+        out.push(LookupRsidEntry {
+            rsid: rsid.clone(),
+            found: matched.is_some(),
+            variant: matched,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +599,34 @@ mod tests {
     fn alleles_missing_returns_raw() {
         assert_eq!(compute_genotype_alleles("./.", "C", "T"), "./.");
         assert_eq!(compute_genotype_alleles("0/.", "C", "T"), "0/.");
+    }
+
+    #[test]
+    fn rsid_index_builds_against_slice() {
+        // GIAB benchmark slice has all IDs = ".", so the resulting index is
+        // expected to be empty. This is a smoke test that build_rsid_index
+        // streams the entire file without erroring out.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/na12878_chr17_slice.vcf.gz");
+        let idx = build_rsid_index(&path).expect("build cache");
+        assert_eq!(idx.len(), 0, "slice has no rsids in ID column");
+    }
+
+    #[test]
+    fn rsid_cache_get_set() {
+        let cache = RsidCache::default();
+        assert!(!cache.has("x"));
+        let mut idx: RsidIndex = HashMap::new();
+        idx.insert(
+            "rs1".to_string(),
+            RsidLocation {
+                chrom: "chr1".to_string(),
+                pos: 100,
+            },
+        );
+        cache.set("x".to_string(), Arc::new(idx));
+        assert!(cache.has("x"));
+        let got = cache.get("x").expect("present");
+        assert_eq!(got.get("rs1").unwrap().pos, 100);
     }
 }

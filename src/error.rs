@@ -61,6 +61,12 @@ pub enum Error {
     #[error("query exceeded {secs}s timeout")]
     QueryTimeout { secs: u64 },
 
+    #[error("rsids list has {count} entries; max {max}")]
+    TooManyRsids { count: usize, max: usize },
+
+    #[error("rsids list is empty")]
+    EmptyRsidList,
+
     #[error("failed to open VCF {path}: {source}")]
     VcfOpen {
         path: PathBuf,

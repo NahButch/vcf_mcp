@@ -44,7 +44,9 @@ fn main() -> Result<()> {
 
     loop {
         buf.clear();
-        let n = reader.read_line(&mut buf).context("reading line from bgzf")?;
+        let n = reader
+            .read_line(&mut buf)
+            .context("reading line from bgzf")?;
         if n == 0 {
             break;
         }
@@ -81,11 +83,7 @@ fn main() -> Result<()> {
 
         if last_report.elapsed().as_secs() >= 2 {
             let rate = records as f64 / started.elapsed().as_secs_f64();
-            eprintln!(
-                "  {} records indexed ({:.0}/s)",
-                fmt_count(records),
-                rate
-            );
+            eprintln!("  {} records indexed ({:.0}/s)", fmt_count(records), rate);
             last_report = Instant::now();
         }
     }

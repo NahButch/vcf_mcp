@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Sample};
 use crate::error::Error;
-use crate::vcf::{self, QueryRegionArgs};
+use crate::vcf::{self, LookupRsidsArgs, QueryRegionArgs, RsidCache};
 
 #[derive(Clone)]
 pub struct VcfServer {
     config: Arc<Config>,
+    rsid_cache: Arc<RsidCache>,
     // Populated and read by the #[tool_router] / #[tool_handler] proc-macros.
     #[allow(dead_code)]
     tool_router: ToolRouter<VcfServer>,
@@ -44,6 +45,7 @@ impl VcfServer {
     pub fn new(config: Arc<Config>) -> Self {
         Self {
             config,
+            rsid_cache: Arc::new(RsidCache::default()),
             tool_router: Self::tool_router(),
         }
     }
@@ -83,6 +85,28 @@ impl VcfServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
+
+    #[tool(
+        description = "Look up variants by dbSNP rsid. First call against a sample triggers a one-time cache build (streams the full VCF, takes seconds-to-minutes depending on file size). Returns one entry per input rsid in input order; entries not found yield {rsid, found: false}. Maximum 100 rsids per call."
+    )]
+    async fn lookup_rsids(
+        &self,
+        Parameters(args): Parameters<LookupRsidsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = vcf::lookup_rsids(
+            self.config.clone(),
+            self.rsid_cache.clone(),
+            LookupRsidsArgs {
+                sample: args.sample,
+                rsids: args.rsids,
+            },
+        )
+        .await
+        .map_err(map_domain_error)?;
+        let payload = serde_json::to_string(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -97,12 +121,22 @@ pub struct QueryRegionParams {
     pub end: u32,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LookupRsidsParams {
+    /// Sample name as configured on the server.
+    pub sample: String,
+    /// dbSNP rsids to look up (e.g. ["rs429358", "rs7412"]). Max 100 per call.
+    pub rsids: Vec<String>,
+}
+
 fn map_domain_error(e: Error) -> McpError {
     match e {
         Error::SampleNotFound(_)
         | Error::InvalidChromosome { .. }
         | Error::InvalidRange { .. }
-        | Error::RegionTooLarge { .. } => McpError::invalid_params(e.to_string(), None),
+        | Error::RegionTooLarge { .. }
+        | Error::EmptyRsidList
+        | Error::TooManyRsids { .. } => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
 }
