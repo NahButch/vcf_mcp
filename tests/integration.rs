@@ -918,6 +918,51 @@ async fn add_sample_rejects_non_vcf_extension() {
 }
 
 #[tokio::test]
+async fn add_sample_builds_index_in_memory_when_tbi_missing() {
+    // Copy just the .vcf.gz (NOT the .tbi) into a temp dir. add_sample should
+    // succeed by building the tabix index in memory; no .tbi should appear
+    // in the temp dir.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/na12878_chr17_slice.vcf.gz");
+    let dst = tmp.path().join("no_tbi_here.vcf.gz");
+    std::fs::copy(&src, &dst).unwrap();
+    let dst_str = dst.to_string_lossy().into_owned();
+
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": dst_str, "name": "in_mem_indexed", "build": "GRCh38"}),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["name"], "in_mem_indexed");
+    assert_eq!(body["build"], "GRCh38");
+
+    // Crucially, no .tbi should have been written next to the VCF.
+    let tbi = tmp.path().join("no_tbi_here.vcf.gz.tbi");
+    assert!(
+        !tbi.exists(),
+        "expected no .tbi to be written; found {}",
+        tbi.display()
+    );
+
+    // And the newly-registered sample should be queryable.
+    let q = h
+        .call_tool(
+            "query_region",
+            json!({"sample": "in_mem_indexed", "chrom": "chr17",
+                   "start": 50180000, "end": 50210000}),
+        )
+        .await;
+    let qbody: Value = serde_json::from_str(extract_text(&q)).unwrap();
+    assert!(qbody["count"].as_u64().unwrap() > 0);
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn remove_sample_works() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     // Pre-add a removable entry.

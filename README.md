@@ -122,9 +122,12 @@ To validate startup without serving:
 vcf-mcp serve --check
 ```
 
-### Building a `.tbi` index
+### Building a `.tbi` index (optional)
 
-If you don't have `tabix` or `bcftools` installed:
+vcf-mcp builds the tabix index in memory on first registration when a `.tbi`
+isn't present, so you usually don't need to pre-index anything. If you'd
+prefer to write a `.tbi` to disk anyway (e.g. for use with `tabix` or
+`bcftools`):
 
 ```bash
 cargo run --release --example index_vcf -- /path/to/your.vcf.gz
@@ -132,7 +135,8 @@ cargo run --release --example index_vcf -- /path/to/your.vcf.gz
 
 This streams the file and writes `<your.vcf.gz>.tbi`. Throughput is roughly
 3 million records/second on a typical desktop; a 30× WGS file with ~12M
-variants indexes in under 5 seconds.
+variants indexes in under 5 seconds. vcf-mcp will use that file directly
+on next `add_sample` rather than rebuilding.
 
 ## Wire into Claude Desktop
 
@@ -210,10 +214,15 @@ Validation chain (short-circuits on the first failure, cheapest first):
 2. Path exists, is a regular file, readable
 3. Filename ends `.vcf.gz` (case-insensitive)
 4. First 4 bytes match BGZF magic `1F 8B 08 04` (rejects plain gzip)
-5. `.tbi` sibling exists
-6. `noodles_vcf::io::indexed_reader::Builder` opens the file
+5. Tabix index is acquired: `.tbi` is loaded from disk if present, **otherwise built in memory** — no `.tbi` is ever written next to the VCF
+6. `noodles_vcf::io::IndexedReader` opens the file with the acquired index
 7. Header has `#CHROM` line, ≥1 sample column, ≥1 `##contig`
 8. Tabix probe on the first indexed contig proves data ↔ index consistency
+
+The in-memory tabix index is cached on the server (per sample) for the
+lifetime of the process, so subsequent queries don't rebuild. Indexes are
+NOT persisted across restarts — they're rebuilt on first query against
+each sample, which is fast (~3–4 s for a 30× WGS file).
 
 Build detection cascade: `##reference=` substring → `##contig=<...assembly=...>`
 field → chr1 length heuristic (GRCh38: 248,956,422; GRCh37: 249,250,621).

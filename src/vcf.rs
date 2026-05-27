@@ -88,7 +88,10 @@ pub async fn query_region(
     let vcf_path = sample.vcf_path.clone();
 
     let timeout = Duration::from_secs(QUERY_TIMEOUT_SECS);
-    let work = tokio::task::spawn_blocking(move || query_region_blocking(&sample, args));
+    let registry_for_blocking = registry.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        query_region_blocking(&sample, &registry_for_blocking, args)
+    });
 
     match tokio::time::timeout(timeout, work).await {
         Err(_) => Err(Error::QueryTimeout {
@@ -102,13 +105,12 @@ pub async fn query_region(
     }
 }
 
-fn query_region_blocking(sample: &Sample, args: QueryRegionArgs) -> Result<QueryRegionResponse> {
-    let mut reader = vcf::io::indexed_reader::Builder::default()
-        .build_from_path(&sample.vcf_path)
-        .map_err(|source| Error::VcfOpen {
-            path: sample.vcf_path.clone(),
-            source,
-        })?;
+fn query_region_blocking(
+    sample: &Sample,
+    registry: &SampleRegistry,
+    args: QueryRegionArgs,
+) -> Result<QueryRegionResponse> {
+    let mut reader = open_indexed_reader_with_cache(registry, sample)?;
     let header = reader.read_header().map_err(|e| Error::VcfRead {
         path: sample.vcf_path.clone(),
         message: e.to_string(),
@@ -739,8 +741,10 @@ pub async fn lookup_rsids(
 
     let vcf_path = sample.vcf_path.clone();
     let rsids = args.rsids.clone();
-    let work =
-        tokio::task::spawn_blocking(move || lookup_rsids_blocking(&sample.vcf_path, &idx, &rsids));
+    let registry_for_blocking = registry.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        lookup_rsids_blocking(&sample, &registry_for_blocking, &idx, &rsids)
+    });
     let results = match tokio::time::timeout(Duration::from_secs(QUERY_TIMEOUT_SECS), work).await {
         Err(_) => {
             return Err(Error::QueryTimeout {
@@ -847,16 +851,13 @@ fn build_rsid_index(path: &Path) -> std::io::Result<RsidIndex> {
 }
 
 fn lookup_rsids_blocking(
-    vcf_path: &Path,
+    sample: &Sample,
+    registry: &SampleRegistry,
     idx: &RsidIndex,
     rsids: &[String],
 ) -> Result<Vec<LookupRsidEntry>> {
-    let mut reader = vcf::io::indexed_reader::Builder::default()
-        .build_from_path(vcf_path)
-        .map_err(|source| Error::VcfOpen {
-            path: vcf_path.to_path_buf(),
-            source,
-        })?;
+    let vcf_path = sample.vcf_path.as_path();
+    let mut reader = open_indexed_reader_with_cache(registry, sample)?;
     let header = reader.read_header().map_err(|e| Error::VcfRead {
         path: vcf_path.to_path_buf(),
         message: e.to_string(),
@@ -1006,13 +1007,18 @@ fn add_sample_blocking(
 
     validate_vcf_path(&canonical)?;
 
-    // Re-use noodles indexed_reader for header inspection and the probe.
-    let mut reader = vcf::io::indexed_reader::Builder::default()
-        .build_from_path(&canonical)
-        .map_err(|source| Error::VcfOpen {
-            path: canonical.clone(),
-            source,
-        })?;
+    // Acquire the tabix index (load .tbi if present, otherwise build in
+    // memory — never write). The Arc-wrapped index gets cached on the
+    // registry after we successfully complete validation.
+    let index = acquire_tabix_index(&canonical)?;
+
+    let file = std::fs::File::open(&canonical).map_err(|source| Error::VcfOpen {
+        path: canonical.clone(),
+        source,
+    })?;
+    // Clone the freshly-built index for the reader; we still hold the
+    // original to cache against the eventual sample name once we know it.
+    let mut reader = vcf::io::IndexedReader::new(file, index.clone());
     let header = reader.read_header().map_err(|e| Error::InvalidVcfFile {
         path: canonical.clone(),
         reason: format!("header parse: {e}"),
@@ -1091,7 +1097,11 @@ fn add_sample_blocking(
         description: args.description.unwrap_or_default(),
     };
 
-    registry.add_validated(sample)
+    let registered = registry.add_validated(sample)?;
+    // Cache the index we just loaded/built so the first query against this
+    // sample doesn't re-acquire it.
+    registry.set_tabix_index(registered.name.clone(), Arc::new(index));
+    Ok(registered)
 }
 
 fn folder_scan_blocking(
@@ -1232,19 +1242,123 @@ fn validate_vcf_path(canonical: &std::path::Path) -> Result<()> {
         });
     }
 
-    // .tbi sibling exists.
+    // Note: .tbi presence is no longer required here. The acquire_tabix_index
+    // helper in add_sample_blocking either loads an existing .tbi or builds
+    // the index entirely in memory — no write to the source folder.
+    Ok(())
+}
+
+/// Acquire a tabix index for the given VCF without touching the filesystem.
+/// If `<vcf>.tbi` exists, deserialize it (cheap). If not, stream the bgzipped
+/// VCF and build the index in memory. The returned index is owned by the
+/// caller and typically gets cached on the `SampleRegistry`.
+fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Index> {
+    use noodles_tabix as tabix;
+
     let mut tbi = canonical.as_os_str().to_owned();
     tbi.push(".tbi");
     let tbi_path = std::path::PathBuf::from(tbi);
-    if !tbi_path.exists() {
-        return Err(Error::IndexMissing {
-            sample: fname.to_string(),
-            vcf: canonical.to_path_buf(),
-            expected: tbi_path,
+
+    if tbi_path.exists() {
+        return tabix::fs::read(&tbi_path).map_err(|e| Error::InvalidVcfFile {
+            path: canonical.to_path_buf(),
+            reason: format!("loading existing .tbi: {e}"),
         });
     }
 
-    Ok(())
+    let started = Instant::now();
+    tracing::info!(
+        vcf = %canonical.display(),
+        "no .tbi found alongside VCF; building tabix index in memory"
+    );
+    let index = build_tabix_index_in_memory(canonical).map_err(|e| Error::InvalidVcfFile {
+        path: canonical.to_path_buf(),
+        reason: format!("tabix index build failed: {e}"),
+    })?;
+    tracing::info!(
+        vcf = %canonical.display(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "built in-memory tabix index"
+    );
+    Ok(index)
+}
+
+/// Stream a bgzipped VCF and produce a tabix index in memory. Same logic as
+/// `examples/index_vcf.rs` but returns the index instead of writing it.
+fn build_tabix_index_in_memory(
+    vcf_path: &std::path::Path,
+) -> std::io::Result<noodles_tabix::Index> {
+    use noodles_csi::{self as csi, binning_index::index::reference_sequence::bin::Chunk};
+    use noodles_tabix as tabix;
+
+    let file = std::fs::File::open(vcf_path)?;
+    let mut reader = bgzf::io::Reader::new(file);
+
+    let mut indexer = tabix::index::Indexer::default();
+    indexer.set_header(csi::binning_index::index::header::Builder::vcf().build());
+
+    let mut line_start = reader.virtual_position();
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let line_end = reader.virtual_position();
+        if buf.starts_with('#') {
+            line_start = line_end;
+            continue;
+        }
+        let mut it = buf.split('\t');
+        let chrom = it
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing CHROM"))?;
+        let pos_str = it
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing POS"))?;
+        let _id = it.next();
+        let ref_bases = it
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing REF"))?;
+
+        let pos: usize = pos_str
+            .trim()
+            .parse()
+            .map_err(|e| std::io::Error::other(format!("bad POS {pos_str:?}: {e}")))?;
+        let start = Position::try_from(pos)
+            .map_err(|e| std::io::Error::other(format!("start out of range: {e}")))?;
+        let end_pos = pos + ref_bases.len().saturating_sub(1);
+        let end = Position::try_from(end_pos.max(pos))
+            .map_err(|e| std::io::Error::other(format!("end out of range: {e}")))?;
+        indexer
+            .add_record(chrom, start, end, Chunk::new(line_start, line_end))
+            .map_err(|e| std::io::Error::other(format!("indexer.add_record: {e}")))?;
+        line_start = line_end;
+    }
+    Ok(indexer.build())
+}
+
+/// Open an `IndexedReader` for the given sample using a cached or
+/// freshly-built tabix index — never reads `<vcf>.tbi` from disk twice and
+/// never writes one. The returned reader's lifetime is bound to the caller.
+fn open_indexed_reader_with_cache(
+    registry: &SampleRegistry,
+    sample: &Sample,
+) -> Result<vcf::io::IndexedReader<bgzf::io::Reader<std::fs::File>>> {
+    let index = match registry.get_tabix_index(&sample.name) {
+        Some(idx) => (*idx).clone(),
+        None => {
+            let fresh = acquire_tabix_index(&sample.vcf_path)?;
+            registry.set_tabix_index(sample.name.clone(), Arc::new(fresh.clone()));
+            fresh
+        }
+    };
+    let file = std::fs::File::open(&sample.vcf_path).map_err(|source| Error::VcfOpen {
+        path: sample.vcf_path.clone(),
+        source,
+    })?;
+    Ok(vcf::io::IndexedReader::new(file, index))
 }
 
 /// Detect genome build from a VCF header. Tries, in order:

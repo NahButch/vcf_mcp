@@ -6,8 +6,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
+use noodles_tabix as tabix;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Sample;
@@ -22,6 +23,10 @@ struct StateFile {
 pub struct SampleRegistry {
     inner: Mutex<Inner>,
     state_path: Option<PathBuf>,
+    // Ephemeral per-sample tabix-index cache. Not persisted to state.json;
+    // rebuilt on demand. Lives on the registry so queries don't have to
+    // thread a separate cache through every call site.
+    tabix_cache: RwLock<HashMap<String, Arc<tabix::Index>>>,
 }
 
 struct Inner {
@@ -38,6 +43,23 @@ impl SampleRegistry {
                 by_path: HashMap::new(),
             }),
             state_path,
+            tabix_cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn get_tabix_index(&self, sample: &str) -> Option<Arc<tabix::Index>> {
+        self.tabix_cache.read().ok()?.get(sample).cloned()
+    }
+
+    pub fn set_tabix_index(&self, sample: String, index: Arc<tabix::Index>) {
+        if let Ok(mut w) = self.tabix_cache.write() {
+            w.insert(sample, index);
+        }
+    }
+
+    fn drop_tabix_index(&self, sample: &str) {
+        if let Ok(mut w) = self.tabix_cache.write() {
+            w.remove(sample);
         }
     }
 
@@ -149,6 +171,7 @@ impl SampleRegistry {
         };
         inner.by_path.remove(&sample.vcf_path);
         drop(inner);
+        self.drop_tabix_index(name);
         self.persist()?;
         Ok(Some(sample))
     }
