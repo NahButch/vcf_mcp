@@ -68,6 +68,9 @@ pub async fn query_region(
     registry: Arc<SampleRegistry>,
     args: QueryRegionArgs,
 ) -> Result<QueryRegionResponse> {
+    if args.start < 1 {
+        return Err(Error::InvalidStart { start: args.start });
+    }
     if args.start > args.end {
         return Err(Error::InvalidRange {
             start: args.start,
@@ -110,20 +113,51 @@ fn query_region_blocking(
     registry: &SampleRegistry,
     args: QueryRegionArgs,
 ) -> Result<QueryRegionResponse> {
+    let started = Instant::now();
     let mut reader = open_indexed_reader_with_cache(registry, sample)?;
     let header = reader.read_header().map_err(|e| Error::VcfRead {
         path: sample.vcf_path.clone(),
         message: e.to_string(),
     })?;
+    tracing::info!(
+        perf = true,
+        phase = "query_region:setup",
+        sample = %sample.name,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "indexed reader open + header read"
+    );
 
     let available_contigs: Vec<String> = header.contigs().keys().cloned().collect();
     let chrom = normalize_chrom(&args.chrom, &available_contigs).ok_or_else(|| {
+        // Truncate the available list — GRCh38+alt+decoy builds have ~2500
+        // contigs and dumping them all bloats the error to hundreds of KB.
+        // The standard chromosomes come first in a well-formed header, so the
+        // first 25 are the useful ones.
+        const SHOW: usize = 25;
+        let total = available_contigs.len();
         Error::InvalidChromosome {
             sample: args.sample.clone(),
             chrom: args.chrom.clone(),
-            available: available_contigs.clone(),
+            available: available_contigs.iter().take(SHOW).cloned().collect(),
+            shown: total.min(SHOW),
+            total,
         }
     })?;
+
+    // Bounds check against the contig's declared length (Issue 3): a start
+    // past the end of the chromosome otherwise surfaces as a noodles
+    // "invalid start bound" read error miscategorized as `unexpected`.
+    if let Some(contig) = header.contigs().get(chrom.as_ref()) {
+        if let Some(len) = contig.length() {
+            if args.start as usize > len {
+                return Err(Error::PositionOutOfBounds {
+                    chrom: chrom.into_owned(),
+                    pos: args.start,
+                    length: len as u32,
+                });
+            }
+        }
+    }
 
     let start = Position::try_from(args.start as usize).map_err(|_| Error::InvalidRange {
         start: args.start,
@@ -139,6 +173,16 @@ fn query_region_blocking(
         path: sample.vcf_path.clone(),
         message: e.to_string(),
     })?;
+    tracing::info!(
+        perf = true,
+        phase = "query_region:query_issued",
+        sample = %sample.name,
+        chrom = %chrom,
+        start = args.start,
+        end = args.end,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "tabix query issued; iterating records"
+    );
 
     let mut variants: Vec<VariantRecord> = Vec::new();
     let mut truncated = false;
@@ -158,6 +202,16 @@ fn query_region_blocking(
         })?;
         variants.push(v);
     }
+
+    tracing::info!(
+        perf = true,
+        phase = "query_region:done",
+        sample = %sample.name,
+        records = variants.len(),
+        truncated = truncated,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "query_region complete"
+    );
 
     Ok(QueryRegionResponse {
         sample: args.sample,

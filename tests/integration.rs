@@ -554,6 +554,75 @@ async fn add_sample_invalid_vcf_is_categorized_user_data() {
 }
 
 #[tokio::test]
+async fn query_region_start_zero_is_invalid_start() {
+    // Issue 2: start=0 should report the 1-based-coordinate problem, not a
+    // misleading start>end message.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "query_region",
+            json!({"sample": "NA12878", "chrom": "chr17", "start": 0, "end": 1000}),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    let payload = extract_error_payload(&resp);
+    assert_eq!(payload["kind"], "InvalidStart");
+    assert_eq!(payload["category"], "user_input");
+    let msg = payload["message"].as_str().unwrap();
+    assert!(
+        msg.contains(">= 1"),
+        "message should explain 1-based: {msg}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_region_position_past_chrom_end_is_out_of_bounds() {
+    // Issue 3: a start past the chromosome length should be user_input /
+    // PositionOutOfBounds, not an `unexpected` VcfRead with a file-locks hint.
+    // chr17 in GRCh38 is ~83 Mbp; 999,000,000 is well past the end.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "query_region",
+            json!({"sample": "NA12878", "chrom": "chr17", "start": 999_000_000, "end": 999_999_999}),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    let payload = extract_error_payload(&resp);
+    assert_eq!(payload["category"], "user_input");
+    assert_eq!(payload["kind"], "PositionOutOfBounds");
+    let msg = payload["message"].as_str().unwrap();
+    assert!(
+        msg.contains("exceeds chromosome") && msg.contains("length"),
+        "message should name the chromosome length: {msg}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_region_unknown_chrom_truncates_contig_list() {
+    // Issue 1: error payload carries a bounded `available` list plus shown/
+    // total counts rather than dumping every contig.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "query_region",
+            json!({"sample": "NA12878", "chrom": "chrNOPE", "start": 1, "end": 1000}),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    let payload = extract_error_payload(&resp);
+    assert_eq!(payload["kind"], "InvalidChromosome");
+    let msg = payload["message"].as_str().unwrap();
+    assert!(
+        msg.contains("Showing") && msg.contains("contigs"),
+        "message should report shown/total contigs: {msg}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn query_region_invalid_range_errors() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     let resp = h

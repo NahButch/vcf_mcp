@@ -51,11 +51,25 @@ pub enum Error {
     #[error("invalid range: start ({start}) must be <= end ({end})")]
     InvalidRange { start: u32, end: u32 },
 
-    #[error("chromosome {chrom:?} not found in sample {sample:?}. Available: {available:?}")]
+    #[error("invalid position: start ({start}) must be >= 1 (coordinates are 1-based)")]
+    InvalidStart { start: u32 },
+
+    #[error("position {pos} exceeds chromosome {chrom} length ({length})")]
+    PositionOutOfBounds {
+        chrom: String,
+        pos: u32,
+        length: u32,
+    },
+
+    #[error(
+        "chromosome {chrom:?} not found in sample {sample:?}. Showing {shown} of {total} contigs: {available:?}"
+    )]
     InvalidChromosome {
         sample: String,
         chrom: String,
         available: Vec<String>,
+        shown: usize,
+        total: usize,
     },
 
     #[error("query exceeded {secs}s timeout")]
@@ -161,6 +175,8 @@ impl Error {
             Error::SampleNotFound(_)
             | Error::InvalidChromosome { .. }
             | Error::InvalidRange { .. }
+            | Error::InvalidStart { .. }
+            | Error::PositionOutOfBounds { .. }
             | Error::RegionTooLarge { .. }
             | Error::EmptyRsidList
             | Error::TooManyRsids { .. }
@@ -217,6 +233,12 @@ impl Error {
             Error::InvalidRange { .. } => {
                 Some("Coordinates are 1-based inclusive. `start` must be <= `end`.")
             }
+            Error::InvalidStart { .. } => {
+                Some("Coordinates are 1-based: the smallest valid position is 1, not 0.")
+            }
+            Error::PositionOutOfBounds { .. } => Some(
+                "The requested start is past the end of the chromosome. Check the chromosome length (the error message shows it) and query within it.",
+            ),
             Error::RegionTooLarge { .. } => {
                 Some("Maximum region length is 10 Mb. Narrow the query or split it into chunks.")
             }
@@ -283,6 +305,8 @@ impl Error {
             Error::SampleNotFound(_) => "SampleNotFound",
             Error::RegionTooLarge { .. } => "RegionTooLarge",
             Error::InvalidRange { .. } => "InvalidRange",
+            Error::InvalidStart { .. } => "InvalidStart",
+            Error::PositionOutOfBounds { .. } => "PositionOutOfBounds",
             Error::InvalidChromosome { .. } => "InvalidChromosome",
             Error::QueryTimeout { .. } => "QueryTimeout",
             Error::TooManyRsids { .. } => "TooManyRsids",
