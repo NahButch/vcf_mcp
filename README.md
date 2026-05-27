@@ -105,7 +105,7 @@ operations still work and persist to the state file. Example (also see
 ```toml
 [[samples]]
 name = "me"                                    # short identifier you'll use in prompts
-vcf_path = "patient_001.snp-indel.vcf.gz"      # absolute, or relative to this config file
+vcf_path = "person_genome_001.snp-indel.vcf.gz"  # absolute, or relative to this config file
 build = "GRCh38"                               # or "GRCh37"
 description = "Whole-genome sequencing, 2025-06-24"
 ```
@@ -251,7 +251,7 @@ collect in a `skipped` array with the per-file reason:
   "folder": "D:\\cohort",
   "scanned": 12,
   "registered": [
-    {"name": "patient_001", "build": "GRCh38", "description": "", "vcf_path": "..."}
+    {"name": "person_genome_001", "build": "GRCh38", "description": "", "vcf_path": "..."}
   ],
   "skipped": [
     {"path": "D:\\cohort\\malformed.vcf.gz", "reason": "BGZF magic mismatch ..."}

@@ -29,7 +29,7 @@ build = "GRCh38"
 description = "GIAB NA12878 / HG001 benchmark calls, v4.2.1, chromosomes 1-22"
 
 [[samples]]
-name = "patient_001"
-vcf_path = "/data/cohort/patient_001.somatic.vcf.gz"
+name = "person_genome_001"
+vcf_path = "/data/cohort/person_genome_001.somatic.vcf.gz"
 build = "GRCh37"
 description = "Example somatic call set"

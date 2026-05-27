@@ -317,8 +317,8 @@ mod tests {
         assert_eq!(derive_name_from_path(Path::new("foo.vcf.gz")), "foo");
         assert_eq!(derive_name_from_path(Path::new("foo.VCF.GZ")), "foo");
         assert_eq!(
-            derive_name_from_path(Path::new("/x/y/patient_001.snp-indel.vcf.gz")),
-            "patient_001_snp-indel"
+            derive_name_from_path(Path::new("/x/y/person_genome_001.snp-indel.vcf.gz")),
+            "person_genome_001_snp-indel"
         );
         assert_eq!(
             derive_name_from_path(Path::new("Jane Doe (WGS).vcf.gz")),
@@ -338,22 +338,22 @@ mod tests {
     fn collision_appends_suffix() {
         let reg = SampleRegistry::new(None);
         let s1 = Sample {
-            name: "patient".into(),
+            name: "person_genome".into(),
             vcf_path: PathBuf::from("/tmp/a.vcf.gz"),
             build: "GRCh38".into(),
             description: String::new(),
         };
         let s2 = Sample {
-            name: "patient".into(),
+            name: "person_genome".into(),
             vcf_path: PathBuf::from("/tmp/b.vcf.gz"),
             build: "GRCh38".into(),
             description: String::new(),
         };
         let r1 = reg.add_validated(s1).unwrap();
         let r2 = reg.add_validated(s2).unwrap();
-        assert_eq!(r1.name, "patient");
-        assert_ne!(r2.name, "patient");
-        assert!(r2.name.starts_with("patient_"));
+        assert_eq!(r1.name, "person_genome");
+        assert_ne!(r2.name, "person_genome");
+        assert!(r2.name.starts_with("person_genome_"));
         assert_eq!(reg.len(), 2);
     }
 
@@ -364,14 +364,14 @@ mod tests {
         // metadata views, or for TOML bootstrap clarity.
         let reg = SampleRegistry::new(None);
         let s = Sample {
-            name: "patient".into(),
+            name: "person_genome".into(),
             vcf_path: PathBuf::from("/tmp/a.vcf.gz"),
             build: "GRCh38".into(),
             description: "first".into(),
         };
         reg.add_validated(s.clone()).unwrap();
         reg.add_validated(Sample {
-            name: "patient_alias".into(),
+            name: "person_genome_alias".into(),
             ..s
         })
         .unwrap();
