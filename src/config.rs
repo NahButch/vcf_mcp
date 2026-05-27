@@ -61,7 +61,9 @@ impl Config {
                 }
             }
         }
-        // Pass 2: filesystem checks.
+        // Pass 2: filesystem check. Only the .vcf.gz needs to exist — the
+        // index is built in memory at registration time, so no .tbi is
+        // required here (consistent with the add_sample tool path).
         for s in &self.samples {
             if !s.vcf_path.exists() {
                 return Err(Error::VcfMissing {
@@ -69,23 +71,9 @@ impl Config {
                     path: s.vcf_path.clone(),
                 });
             }
-            let tbi = tabix_path_for(&s.vcf_path);
-            if !tbi.exists() {
-                return Err(Error::IndexMissing {
-                    sample: s.name.clone(),
-                    vcf: s.vcf_path.clone(),
-                    expected: tbi,
-                });
-            }
         }
         Ok(())
     }
-}
-
-fn tabix_path_for(vcf: &Path) -> PathBuf {
-    let mut tbi = vcf.as_os_str().to_owned();
-    tbi.push(".tbi");
-    PathBuf::from(tbi)
 }
 
 #[allow(dead_code)] // retained for back-compat; users may still pass --config <path>
@@ -141,13 +129,5 @@ mod tests {
             ],
         };
         assert!(matches!(cfg.validate(), Err(Error::DuplicateSample(_))));
-    }
-
-    #[test]
-    fn tabix_path_appends_tbi() {
-        assert_eq!(
-            tabix_path_for(Path::new("/data/x.vcf.gz")),
-            PathBuf::from("/data/x.vcf.gz.tbi")
-        );
     }
 }

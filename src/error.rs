@@ -29,13 +29,6 @@ pub enum Error {
     #[error("VCF path does not exist for sample {sample:?}: {path}")]
     VcfMissing { sample: String, path: PathBuf },
 
-    #[error("tabix index not found for sample {sample:?}: expected {expected} alongside {vcf}")]
-    IndexMissing {
-        sample: String,
-        vcf: PathBuf,
-        expected: PathBuf,
-    },
-
     #[error("duplicate sample name {0:?} in config")]
     DuplicateSample(String),
 
@@ -195,7 +188,6 @@ impl Error {
             Error::ConfigRead { .. }
             | Error::ConfigParse { .. }
             | Error::VcfMissing { .. }
-            | Error::IndexMissing { .. }
             | Error::PathInvalid { .. }
             | Error::InvalidVcfFile { .. }
             | Error::BuildNotDetectable { .. }
@@ -223,9 +215,6 @@ impl Error {
             }
             Error::PathInvalid { .. } => Some(
                 "Check the path is absolute, the file exists, and the user has read permission. On Windows, prefer forward slashes or escaped backslashes in JSON.",
-            ),
-            Error::IndexMissing { .. } => Some(
-                "vcf-mcp builds the tabix index in memory if it's missing on disk, so this error usually means the file location is read-only or the underlying .vcf.gz isn't readable. Check directory permissions.",
             ),
             Error::SampleNotFound(_) => Some(
                 "Call list_samples to see what's registered, or add_sample to register this one.",
@@ -299,7 +288,6 @@ impl Error {
             Error::ConfigParse { .. } => "ConfigParse",
             Error::InvalidBuild { .. } => "InvalidBuild",
             Error::VcfMissing { .. } => "VcfMissing",
-            Error::IndexMissing { .. } => "IndexMissing",
             Error::DuplicateSample(_) => "DuplicateSample",
             Error::NoSamples => "NoSamples",
             Error::SampleNotFound(_) => "SampleNotFound",

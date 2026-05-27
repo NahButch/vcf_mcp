@@ -1623,7 +1623,7 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
         });
         tracing::info!(
             perf = true,
-            phase = "tabix_index",
+            phase = "index_build",
             event = "ready",
             source = "disk",
             vcf = %canonical.display(),
@@ -1636,7 +1636,7 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
     let started = Instant::now();
     tracing::info!(
         perf = true,
-        phase = "tabix_index",
+        phase = "index_build",
         event = "build_start",
         source = "memory",
         vcf = %canonical.display(),
@@ -1648,7 +1648,7 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
     })?;
     tracing::info!(
         perf = true,
-        phase = "tabix_index",
+        phase = "index_build",
         event = "ready",
         source = "memory",
         vcf = %canonical.display(),

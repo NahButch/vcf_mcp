@@ -52,8 +52,10 @@ cargo run --release --example index_vcf -- /path/to/your.vcf.gz
 
 ## Prerequisites
 
-- A **bgzipped, tabix-indexed VCF** (or several). If you don't have a `.tbi`,
-  vcf-mcp ships a helper to build one (see below).
+- A **bgzipped VCF** (`.vcf.gz`), or several. No `.tbi` index file is
+  required — vcf-mcp builds the index in memory at registration time. (If a
+  `.tbi` already sits alongside the file it's used as a fast-load shortcut,
+  but it's optional.)
 - **Rust ≥ 1.85** (transitive deps use Rust 2024 edition features). Install
   from [rustup.rs](https://rustup.rs/).
 - An **MCP-capable client**. Tested with Claude Desktop on Windows.
@@ -112,9 +114,9 @@ description = "Whole-genome sequencing, 2025-06-24"
 `add_samples_from_folder`. Default cap 50 files, hard cap 200; see the tool
 reference below.
 
-Whichever path you choose, each VCF must be bgzipped with a `.tbi` alongside
-(the server has a built-in indexer if you don't have one — see "Building a
-`.tbi` index" below).
+Whichever path you choose, each VCF must be **bgzipped** (`.vcf.gz`). No
+`.tbi` is required — the server builds the index in memory when the sample is
+registered.
 
 To validate startup without serving:
 

@@ -1,8 +1,12 @@
 # vcf-mcp configuration
 #
 # Each [[samples]] entry registers a VCF file that the MCP server can query.
-# All paths must be absolute, point to a bgzipped VCF (.vcf.gz), and have a
-# matching tabix index (.vcf.gz.tbi) sitting next to the data file.
+# Paths must be absolute and point to a bgzipped VCF (.vcf.gz). No .tbi index
+# file is required — the server builds the index in memory at startup (an
+# existing .tbi alongside the file is used as a fast-load shortcut if present).
+#
+# This file is only one way to register samples; you can also add them at
+# runtime by asking Claude ("add this VCF: <path>"), which calls add_sample.
 #
 # Copy this file to the OS-specific config location and edit:
 #   Linux:   ~/.config/vcf-mcp/config.toml
@@ -15,7 +19,7 @@
 # Short, stable identifier the MCP client uses to refer to this sample.
 name = "NA12878"
 
-# Absolute path to a bgzipped VCF. A companion .vcf.gz.tbi must exist alongside.
+# Absolute path to a bgzipped VCF (.vcf.gz). No companion .tbi required.
 vcf_path = "/data/giab/HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
 
 # Genome build. Must be exactly "GRCh37" or "GRCh38".

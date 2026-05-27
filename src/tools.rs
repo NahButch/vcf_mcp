@@ -82,7 +82,7 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Register a single bgzipped, tabix-indexed VCF file as a queryable sample. Pass an absolute file path (must end in .vcf.gz and have a matching .tbi alongside). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a tabix probe before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended."
+        description = "Register a single bgzipped VCF file as a queryable sample. Pass an absolute file path ending in .vcf.gz. No tabix .tbi file is required — the server builds the index in memory (and uses an existing .tbi as a fast-load shortcut only if one happens to be present). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a probe query before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended."
     )]
     async fn add_sample(
         &self,
