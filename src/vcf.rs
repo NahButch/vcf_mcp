@@ -29,7 +29,7 @@ const MAX_RECORDS: usize = 500;
 const QUERY_TIMEOUT_SECS: u64 = 30;
 const MAX_RSIDS_PER_LOOKUP: usize = 100;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VariantRecord {
     pub chrom: String,
     pub pos: u32,
@@ -397,6 +397,265 @@ pub async fn query_gene(cfg: Arc<Config>, args: QueryGeneArgs) -> Result<QueryGe
         truncated: region_response.truncated,
         variants: region_response.variants,
     })
+}
+
+// ---------- compare_samples ----------
+
+#[derive(Debug, Clone)]
+pub enum CompareQuery {
+    Rsids(Vec<String>),
+    Region { chrom: String, start: u32, end: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub struct CompareSamplesArgs {
+    pub samples: Vec<String>,
+    pub query: CompareQuery,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompareSampleResult {
+    pub sample: String,
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genotype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genotype_alleles: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gq: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompareVariantEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rsid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chrom: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pos: Option<u32>,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub ref_bases: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
+    pub results: Vec<CompareSampleResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompareSamplesResponse {
+    pub samples: Vec<String>,
+    pub query_type: &'static str,
+    pub count: usize,
+    pub truncated: bool,
+    pub results: Vec<CompareVariantEntry>,
+}
+
+pub async fn compare_samples(
+    cfg: Arc<Config>,
+    cache: Arc<RsidCache>,
+    args: CompareSamplesArgs,
+) -> Result<CompareSamplesResponse> {
+    if args.samples.len() < 2 {
+        return Err(Error::TooFewSamples {
+            count: args.samples.len(),
+        });
+    }
+    // Up-front sample existence check so we fail before doing any IO.
+    for name in &args.samples {
+        if !cfg.samples.iter().any(|s| &s.name == name) {
+            return Err(Error::SampleNotFound(name.clone()));
+        }
+    }
+    match args.query.clone() {
+        CompareQuery::Region { chrom, start, end } => {
+            compare_region(cfg, &args.samples, &chrom, start, end).await
+        }
+        CompareQuery::Rsids(rsids) => compare_by_rsids(cfg, cache, &args.samples, &rsids).await,
+    }
+}
+
+async fn compare_region(
+    cfg: Arc<Config>,
+    samples: &[String],
+    chrom: &str,
+    start: u32,
+    end: u32,
+) -> Result<CompareSamplesResponse> {
+    use std::collections::HashMap;
+
+    let mut per_sample: HashMap<String, Vec<VariantRecord>> = HashMap::new();
+    let mut any_truncated = false;
+    for name in samples {
+        let resp = query_region(
+            cfg.clone(),
+            QueryRegionArgs {
+                sample: name.clone(),
+                chrom: chrom.to_string(),
+                start,
+                end,
+            },
+        )
+        .await?;
+        if resp.truncated {
+            any_truncated = true;
+        }
+        per_sample.insert(name.clone(), resp.variants);
+    }
+
+    // Key by (chrom, pos, ref, alt). Iterate samples in input order so the
+    // first-time-seen variants get inserted deterministically (only matters
+    // for which rsid wins when two samples disagree on rsid annotation —
+    // first sample wins).
+    type Key = (String, u32, String, String);
+    let mut by_key: HashMap<Key, CompareVariantEntry> = HashMap::new();
+    let mut key_order: Vec<Key> = Vec::new();
+    for name in samples {
+        for v in per_sample.get(name).into_iter().flatten() {
+            let key = (v.chrom.clone(), v.pos, v.ref_bases.clone(), v.alt.clone());
+            if let std::collections::hash_map::Entry::Vacant(slot) = by_key.entry(key.clone()) {
+                key_order.push(key);
+                slot.insert(CompareVariantEntry {
+                    rsid: v.rsid.clone(),
+                    chrom: Some(v.chrom.clone()),
+                    pos: Some(v.pos),
+                    ref_bases: Some(v.ref_bases.clone()),
+                    alt: Some(v.alt.clone()),
+                    results: Vec::with_capacity(samples.len()),
+                });
+            }
+        }
+    }
+
+    // For each entry, build per-sample results in input order.
+    for entry in by_key.values_mut() {
+        for name in samples {
+            let matching = per_sample.get(name).and_then(|vs| {
+                vs.iter().find(|v| {
+                    Some(&v.chrom) == entry.chrom.as_ref()
+                        && Some(v.pos) == entry.pos
+                        && Some(&v.ref_bases) == entry.ref_bases.as_ref()
+                        && Some(&v.alt) == entry.alt.as_ref()
+                })
+            });
+            entry
+                .results
+                .push(make_sample_result(name, matching.cloned()));
+        }
+    }
+
+    // Emit in (chrom, pos) sort order for stable output.
+    let mut results: Vec<CompareVariantEntry> = key_order
+        .into_iter()
+        .map(|k| by_key.remove(&k).unwrap())
+        .collect();
+    results.sort_by(|a, b| {
+        a.chrom
+            .cmp(&b.chrom)
+            .then(a.pos.cmp(&b.pos))
+            .then(a.ref_bases.cmp(&b.ref_bases))
+            .then(a.alt.cmp(&b.alt))
+    });
+
+    Ok(CompareSamplesResponse {
+        samples: samples.to_vec(),
+        query_type: "region",
+        count: results.len(),
+        truncated: any_truncated,
+        results,
+    })
+}
+
+async fn compare_by_rsids(
+    cfg: Arc<Config>,
+    cache: Arc<RsidCache>,
+    samples: &[String],
+    rsids: &[String],
+) -> Result<CompareSamplesResponse> {
+    use std::collections::HashMap;
+
+    let mut per_sample: HashMap<String, Vec<LookupRsidEntry>> = HashMap::new();
+    for name in samples {
+        let resp = lookup_rsids(
+            cfg.clone(),
+            cache.clone(),
+            LookupRsidsArgs {
+                sample: name.clone(),
+                rsids: rsids.to_vec(),
+            },
+        )
+        .await?;
+        per_sample.insert(name.clone(), resp.results);
+    }
+
+    let mut results: Vec<CompareVariantEntry> = Vec::with_capacity(rsids.len());
+    for rsid in rsids {
+        // Use the first sample with a hit (in input sample order) to populate
+        // chrom/pos/ref/alt metadata.
+        let mut meta: Option<&VariantRecord> = None;
+        for name in samples {
+            let entries = per_sample.get(name).unwrap();
+            if let Some(e) = entries
+                .iter()
+                .find(|e| e.rsid == *rsid && e.found && e.variant.is_some())
+            {
+                meta = e.variant.as_ref();
+                break;
+            }
+        }
+
+        let mut sample_results = Vec::with_capacity(samples.len());
+        for name in samples {
+            let entries = per_sample.get(name).unwrap();
+            let variant = entries
+                .iter()
+                .find(|e| e.rsid == *rsid && e.found)
+                .and_then(|e| e.variant.clone());
+            sample_results.push(make_sample_result(name, variant));
+        }
+
+        results.push(CompareVariantEntry {
+            rsid: Some(rsid.clone()),
+            chrom: meta.map(|v| v.chrom.clone()),
+            pos: meta.map(|v| v.pos),
+            ref_bases: meta.map(|v| v.ref_bases.clone()),
+            alt: meta.map(|v| v.alt.clone()),
+            results: sample_results,
+        });
+    }
+
+    Ok(CompareSamplesResponse {
+        samples: samples.to_vec(),
+        query_type: "rsids",
+        count: results.len(),
+        truncated: false,
+        results,
+    })
+}
+
+fn make_sample_result(name: &str, variant: Option<VariantRecord>) -> CompareSampleResult {
+    match variant {
+        Some(v) => CompareSampleResult {
+            sample: name.to_string(),
+            found: true,
+            genotype: v.genotype,
+            genotype_alleles: v.genotype_alleles,
+            depth: v.depth,
+            gq: v.gq,
+            filter: Some(v.filter),
+        },
+        None => CompareSampleResult {
+            sample: name.to_string(),
+            found: false,
+            genotype: None,
+            genotype_alleles: None,
+            depth: None,
+            gq: None,
+            filter: None,
+        },
+    }
 }
 
 // ---------- lookup_rsids ----------

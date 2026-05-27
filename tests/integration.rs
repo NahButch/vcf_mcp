@@ -323,9 +323,14 @@ async fn list_samples_returns_configured_samples() {
     let resp = h.call_tool("list_samples", json!({})).await;
     let text = extract_text(&resp);
     let samples: Vec<Value> = serde_json::from_str(text).unwrap();
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0]["name"], "NA12878");
-    assert_eq!(samples[0]["build"], "GRCh38");
+    assert_eq!(samples.len(), 2);
+    let names: Vec<&str> = samples
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"NA12878"));
+    assert!(names.contains(&"NA12878_copy"));
+    assert!(samples.iter().all(|s| s["build"] == "GRCh38"));
     h.shutdown().await;
 }
 
@@ -695,6 +700,121 @@ async fn lookup_rsids_unknown_sample_errors() {
     let msg = resp["error"]["message"].as_str().unwrap();
     assert!(
         msg.contains("NOPE"),
+        "error should mention bad sample: {msg}"
+    );
+    h.shutdown().await;
+}
+
+// ---------- compare_samples ----------
+//
+// Both fixture samples (NA12878 and NA12878_copy) point at the same VCF, so
+// any query should return identical per-sample genotypes — that's what these
+// tests assert.
+
+#[tokio::test]
+async fn compare_samples_region_identical_for_duplicate() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "compare_samples",
+            json!({
+                "samples": ["NA12878", "NA12878_copy"],
+                "query": {"chrom": "chr17", "start": 50180000, "end": 50210000}
+            }),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["query_type"], "region");
+    assert_eq!(body["samples"][0], "NA12878");
+    assert_eq!(body["samples"][1], "NA12878_copy");
+    assert_eq!(body["truncated"], false);
+    let entries = body["results"].as_array().unwrap();
+    assert!(!entries.is_empty(), "expected variants in COL1A1 region");
+
+    for v in entries {
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["sample"], "NA12878");
+        assert_eq!(results[1]["sample"], "NA12878_copy");
+        assert_eq!(results[0]["found"], true);
+        assert_eq!(results[1]["found"], true);
+        assert_eq!(results[0]["genotype"], results[1]["genotype"]);
+        assert_eq!(
+            results[0]["genotype_alleles"],
+            results[1]["genotype_alleles"]
+        );
+        assert_eq!(results[0]["depth"], results[1]["depth"]);
+    }
+    let positions: Vec<u64> = entries.iter().map(|e| e["pos"].as_u64().unwrap()).collect();
+    let mut sorted = positions.clone();
+    sorted.sort();
+    assert_eq!(positions, sorted, "entries should be position-sorted");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn compare_samples_rsids_preserves_input_order() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "compare_samples",
+            json!({
+                "samples": ["NA12878", "NA12878_copy"],
+                "query": {"rsids": ["rs1", "rs2", "rs3"]}
+            }),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["query_type"], "rsids");
+    let entries = body["results"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["rsid"], "rs1");
+    assert_eq!(entries[1]["rsid"], "rs2");
+    assert_eq!(entries[2]["rsid"], "rs3");
+    // GIAB slice has ID="." so all samples report not-found.
+    for e in entries {
+        let per_sample = e["results"].as_array().unwrap();
+        assert_eq!(per_sample.len(), 2);
+        assert_eq!(per_sample[0]["found"], false);
+        assert_eq!(per_sample[1]["found"], false);
+    }
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn compare_samples_too_few_errors() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "compare_samples",
+            json!({
+                "samples": ["NA12878"],
+                "query": {"chrom": "chr17", "start": 50180000, "end": 50210000}
+            }),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    let msg = resp["error"]["message"].as_str().unwrap();
+    assert!(msg.contains('2'), "msg: {msg}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn compare_samples_unknown_sample_errors() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "compare_samples",
+            json!({
+                "samples": ["NA12878", "GHOST"],
+                "query": {"chrom": "chr17", "start": 50180000, "end": 50210000}
+            }),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    let msg = resp["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("GHOST"),
         "error should mention bad sample: {msg}"
     );
     h.shutdown().await;

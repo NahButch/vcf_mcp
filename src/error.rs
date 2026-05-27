@@ -70,6 +70,9 @@ pub enum Error {
     #[error("{0}")]
     GeneNotFound(String),
 
+    #[error("compare_samples needs at least 2 samples; got {count}")]
+    TooFewSamples { count: usize },
+
     #[error("failed to open VCF {path}: {source}")]
     VcfOpen {
         path: PathBuf,

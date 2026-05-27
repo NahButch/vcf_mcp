@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Sample};
 use crate::error::Error;
-use crate::vcf::{self, LookupRsidsArgs, QueryGeneArgs, QueryRegionArgs, RsidCache};
+use crate::vcf::{
+    self, CompareQuery, CompareSamplesArgs, LookupRsidsArgs, QueryGeneArgs, QueryRegionArgs,
+    RsidCache,
+};
 
 #[derive(Clone)]
 pub struct VcfServer {
@@ -109,6 +112,34 @@ impl VcfServer {
     }
 
     #[tool(
+        description = "Run the same query across multiple samples and merge the per-sample results into one position-keyed table. The `query` field is either {\"rsids\": [...]} (uses lookup_rsids; max 100) or {\"chrom\": ..., \"start\": ..., \"end\": ...} (uses query_region; max 10 Mb, 500 records per sample). For each variant any sample has, every sample gets an entry — `found: false` when that sample has no matching call. Minimum 2 samples."
+    )]
+    async fn compare_samples(
+        &self,
+        Parameters(args): Parameters<CompareSamplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner_query = match args.query {
+            CompareQueryParams::Rsids { rsids } => CompareQuery::Rsids(rsids),
+            CompareQueryParams::Region { chrom, start, end } => {
+                CompareQuery::Region { chrom, start, end }
+            }
+        };
+        let result = vcf::compare_samples(
+            self.config.clone(),
+            self.rsid_cache.clone(),
+            CompareSamplesArgs {
+                samples: args.samples,
+                query: inner_query,
+            },
+        )
+        .await
+        .map_err(map_domain_error)?;
+        let payload = serde_json::to_string(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
         description = "Look up variants by dbSNP rsid. First call against a sample triggers a one-time cache build (streams the full VCF, takes seconds-to-minutes depending on file size). Returns one entry per input rsid in input order; entries not found yield {rsid, found: false}. Maximum 100 rsids per call."
     )]
     async fn lookup_rsids(
@@ -161,6 +192,21 @@ pub struct QueryGeneParams {
     pub flank_bp: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CompareSamplesParams {
+    /// Sample names to compare; minimum 2.
+    pub samples: Vec<String>,
+    /// Either a list of rsids or a chromosome region.
+    pub query: CompareQueryParams,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum CompareQueryParams {
+    Rsids { rsids: Vec<String> },
+    Region { chrom: String, start: u32, end: u32 },
+}
+
 fn map_domain_error(e: Error) -> McpError {
     match e {
         Error::SampleNotFound(_)
@@ -169,7 +215,8 @@ fn map_domain_error(e: Error) -> McpError {
         | Error::RegionTooLarge { .. }
         | Error::EmptyRsidList
         | Error::TooManyRsids { .. }
-        | Error::GeneNotFound(_) => McpError::invalid_params(e.to_string(), None),
+        | Error::GeneNotFound(_)
+        | Error::TooFewSamples { .. } => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
 }
