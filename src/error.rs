@@ -193,6 +193,82 @@ impl Error {
         }
     }
 
+    /// Actionable next-step text the LLM can use verbatim or paraphrase
+    /// when explaining the failure to the user. `None` means the error's
+    /// `Display` message is already enough on its own (e.g. it already
+    /// contains "Did you mean: X?" or similar guidance).
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Error::InvalidVcfFile { .. } => Some(
+                "If the file should be a VCF: confirm it's bgzipped (not plain gzip — `gzip -t` will accept both but only bgzip output is tabix-indexable). If the BGZF magic is wrong, the file may be a different format with a misleading extension. If the header parse failed, it may be truncated — re-download and check the md5 if one is published.",
+            ),
+            Error::BuildNotDetectable { .. } => {
+                Some("Re-call add_sample with `build` set explicitly to \"GRCh37\" or \"GRCh38\".")
+            }
+            Error::PathInvalid { .. } => Some(
+                "Check the path is absolute, the file exists, and the user has read permission. On Windows, prefer forward slashes or escaped backslashes in JSON.",
+            ),
+            Error::IndexMissing { .. } => Some(
+                "vcf-mcp builds the tabix index in memory if it's missing on disk, so this error usually means the file location is read-only or the underlying .vcf.gz isn't readable. Check directory permissions.",
+            ),
+            Error::SampleNotFound(_) => Some(
+                "Call list_samples to see what's registered, or add_sample to register this one.",
+            ),
+            Error::InvalidRange { .. } => {
+                Some("Coordinates are 1-based inclusive. `start` must be <= `end`.")
+            }
+            Error::RegionTooLarge { .. } => {
+                Some("Maximum region length is 10 Mb. Narrow the query or split it into chunks.")
+            }
+            Error::EmptyRsidList => Some("Pass at least one rsid in the `rsids` array."),
+            Error::TooManyRsids { .. } => {
+                Some("Split the rsids across multiple lookup_rsids calls (100 per call).")
+            }
+            Error::TooFewSamples { .. } => Some(
+                "compare_samples needs at least 2 different sample names. Use query_region or query_gene for single-sample queries.",
+            ),
+            Error::TooManyFiles { .. } => Some(
+                "Re-call add_samples_from_folder with `max_files` set to the actual count (the error message shows it).",
+            ),
+            Error::ResetNotConfirmed => Some(
+                "If the user really wants to wipe the registry, re-call reset_samples with `confirm: true`.",
+            ),
+            Error::DuplicateSample(_) => Some(
+                "Pick a different name, or call remove_sample first if you intend to replace the existing entry.",
+            ),
+            Error::NoSamples => Some("Use add_sample to register at least one VCF first."),
+            Error::InvalidBuild { .. } => {
+                Some("Allowed values are \"GRCh37\" and \"GRCh38\" (case-sensitive).")
+            }
+            Error::PathNotAllowed { .. } => Some(
+                "This server was started with --allowed-root restricting which paths can be registered. The user must either provide a path under one of the allowed roots or restart the server without the restriction.",
+            ),
+            Error::VcfMissing { .. } => Some(
+                "The file no longer exists at its registered path. Either re-register it (if it moved) or use remove_sample.",
+            ),
+            Error::VcfOpen { .. } => Some(
+                "The file couldn't be opened mid-query. It may have been moved, deleted, or its permissions changed since registration.",
+            ),
+            Error::VcfRead { .. } => Some(
+                "A read error occurred during query. The file may be locked by another process, truncated, or on a flaky network mount.",
+            ),
+            Error::QueryTimeout { .. } => Some(
+                "Try a narrower region. If a narrow region still times out, the underlying disk may be slow or the file may be on a remote mount.",
+            ),
+            Error::StateFile { .. } => Some(
+                "Check write permissions on the state file directory, or restart with --ephemeral to skip persistence.",
+            ),
+            Error::ConfigRead { .. } => Some("Verify the --config path exists and is readable."),
+            Error::ConfigParse { .. } => Some(
+                "Fix the TOML syntax in the config file. Most often this is a missing `[[samples]]` header or a typo in a field name.",
+            ),
+            // These errors already carry actionable detail in their message
+            // (e.g. GeneNotFound includes suggestions; InvalidChromosome lists
+            // available contigs).
+            Error::GeneNotFound(_) | Error::InvalidChromosome { .. } => None,
+        }
+    }
+
     /// Stable identifier for the error variant — useful for log filtering
     /// and (eventually) for stable bug-report titles.
     pub fn kind(&self) -> &'static str {

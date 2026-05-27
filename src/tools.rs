@@ -63,10 +63,7 @@ impl VcfServer {
         description = "Return the running server's identity: vcf-mcp version, embedded Ensembl gene-table release per build, and the current count of registered samples. Use this when the user asks what version they're talking to or what reference data is in play."
     )]
     async fn server_info(&self) -> Result<CallToolResult, McpError> {
-        let info = vcf::server_info(&self.registry);
-        let payload = serde_json::to_string(&info)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
+        tool_ok(&vcf::server_info(&self.registry))
     }
 
     #[tool(
@@ -75,9 +72,7 @@ impl VcfServer {
     async fn list_samples(&self) -> Result<CallToolResult, McpError> {
         let samples = self.registry.list();
         let summaries: Vec<SampleSummary<'_>> = samples.iter().map(SampleSummary::from).collect();
-        let payload = serde_json::to_string(&summaries)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
+        tool_ok(&summaries)
     }
 
     #[tool(
@@ -87,7 +82,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<AddSampleParams>,
     ) -> Result<CallToolResult, McpError> {
-        let sample = vcf::add_sample(
+        let result = vcf::add_sample(
             self.registry.clone(),
             self.allowed_roots.clone(),
             AddSampleArgs {
@@ -97,12 +92,11 @@ impl VcfServer {
                 description: args.description,
             },
         )
-        .await
-        .map_err(map_domain_error)?;
-        let summary = SampleSummary::from(&sample);
-        let payload = serde_json::to_string(&summary)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
+        .await;
+        match result {
+            Ok(s) => tool_ok(&SampleSummary::from(&s)),
+            Err(e) => Ok(domain_error_to_result(e)),
+        }
     }
 
     #[tool(
@@ -112,20 +106,18 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<AddSamplesFromFolderParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = vcf::add_samples_from_folder(
-            self.registry.clone(),
-            self.allowed_roots.clone(),
-            AddSamplesFromFolderArgs {
-                folder: args.folder,
-                recursive: args.recursive,
-                max_files: args.max_files,
-            },
+        into_tool_result(
+            vcf::add_samples_from_folder(
+                self.registry.clone(),
+                self.allowed_roots.clone(),
+                AddSamplesFromFolderArgs {
+                    folder: args.folder,
+                    recursive: args.recursive,
+                    max_files: args.max_files,
+                },
+            )
+            .await,
         )
-        .await
-        .map_err(map_domain_error)?;
-        let payload = serde_json::to_string(&resp)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 
     #[tool(
@@ -135,15 +127,11 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<RemoveSampleParams>,
     ) -> Result<CallToolResult, McpError> {
-        let removed = vcf::remove_sample(self.registry.clone(), args.name.clone())
-            .await
-            .map_err(map_domain_error)?;
-        let payload = match removed {
-            Some(s) => serde_json::to_string(&SampleSummary::from(&s)),
-            None => Ok(format!("{{\"removed\":false,\"name\":{:?}}}", args.name)),
+        match vcf::remove_sample(self.registry.clone(), args.name.clone()).await {
+            Ok(Some(s)) => tool_ok(&SampleSummary::from(&s)),
+            Ok(None) => tool_ok(&serde_json::json!({"removed": false, "name": args.name})),
+            Err(e) => Ok(domain_error_to_result(e)),
         }
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 
     #[tool(
@@ -154,14 +142,9 @@ impl VcfServer {
         Parameters(args): Parameters<ResetSamplesParams>,
     ) -> Result<CallToolResult, McpError> {
         if !args.confirm {
-            return Err(map_domain_error(Error::ResetNotConfirmed));
+            return Ok(domain_error_to_result(Error::ResetNotConfirmed));
         }
-        let resp = vcf::reset_samples(self.registry.clone(), self.rsid_cache.clone())
-            .await
-            .map_err(map_domain_error)?;
-        let payload = serde_json::to_string(&resp)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
+        into_tool_result(vcf::reset_samples(self.registry.clone(), self.rsid_cache.clone()).await)
     }
 
     #[tool(
@@ -171,20 +154,18 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<QueryRegionParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = vcf::query_region(
-            self.registry.clone(),
-            QueryRegionArgs {
-                sample: args.sample,
-                chrom: args.chrom,
-                start: args.start,
-                end: args.end,
-            },
+        into_tool_result(
+            vcf::query_region(
+                self.registry.clone(),
+                QueryRegionArgs {
+                    sample: args.sample,
+                    chrom: args.chrom,
+                    start: args.start,
+                    end: args.end,
+                },
+            )
+            .await,
         )
-        .await
-        .map_err(map_domain_error)?;
-        let payload = serde_json::to_string(&result)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 
     #[tool(
@@ -194,19 +175,17 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<QueryGeneParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = vcf::query_gene(
-            self.registry.clone(),
-            QueryGeneArgs {
-                sample: args.sample,
-                gene: args.gene,
-                flank_bp: args.flank_bp,
-            },
+        into_tool_result(
+            vcf::query_gene(
+                self.registry.clone(),
+                QueryGeneArgs {
+                    sample: args.sample,
+                    gene: args.gene,
+                    flank_bp: args.flank_bp,
+                },
+            )
+            .await,
         )
-        .await
-        .map_err(map_domain_error)?;
-        let payload = serde_json::to_string(&result)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 
     #[tool(
@@ -222,19 +201,17 @@ impl VcfServer {
                 CompareQuery::Region { chrom, start, end }
             }
         };
-        let result = vcf::compare_samples(
-            self.registry.clone(),
-            self.rsid_cache.clone(),
-            CompareSamplesArgs {
-                samples: args.samples,
-                query: inner_query,
-            },
+        into_tool_result(
+            vcf::compare_samples(
+                self.registry.clone(),
+                self.rsid_cache.clone(),
+                CompareSamplesArgs {
+                    samples: args.samples,
+                    query: inner_query,
+                },
+            )
+            .await,
         )
-        .await
-        .map_err(map_domain_error)?;
-        let payload = serde_json::to_string(&result)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 
     #[tool(
@@ -244,19 +221,17 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<LookupRsidsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = vcf::lookup_rsids(
-            self.registry.clone(),
-            self.rsid_cache.clone(),
-            LookupRsidsArgs {
-                sample: args.sample,
-                rsids: args.rsids,
-            },
+        into_tool_result(
+            vcf::lookup_rsids(
+                self.registry.clone(),
+                self.rsid_cache.clone(),
+                LookupRsidsArgs {
+                    sample: args.sample,
+                    rsids: args.rsids,
+                },
+            )
+            .await,
         )
-        .await
-        .map_err(map_domain_error)?;
-        let payload = serde_json::to_string(&result)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 }
 
@@ -342,15 +317,46 @@ pub struct ResetSamplesParams {
     pub confirm: bool,
 }
 
-fn map_domain_error(e: Error) -> McpError {
+/// Helper: a successful tool result wrapping any Serialize value as its
+/// JSON text content. Internal serialization failures (our own bug) still
+/// flow back as a JSON-RPC McpError::internal_error since they're truly
+/// transport-level, not a domain outcome the LLM should reason about.
+fn tool_ok<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+    let payload =
+        serde_json::to_string(value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    Ok(CallToolResult::success(vec![Content::text(payload)]))
+}
+
+/// Helper: collapse a domain Result into the right CallToolResult shape —
+/// success → tool_ok; Err → tool-result with isError=true via
+/// `domain_error_to_result`. Errors never go back through the JSON-RPC
+/// error channel where clients tend to mask them as "failed to call tool".
+fn into_tool_result<T: Serialize>(r: Result<T, Error>) -> Result<CallToolResult, McpError> {
+    match r {
+        Ok(v) => tool_ok(&v),
+        Err(e) => Ok(domain_error_to_result(e)),
+    }
+}
+
+/// Convert a domain Error into a tool result with `isError: true`. The
+/// payload includes the kind, category, message, and an optional hint so
+/// the LLM has everything it needs to either coach the user (`user_input`),
+/// help them diagnose a data/env issue (`user_data`), or offer to file a
+/// bug (`unexpected`).
+///
+/// This returns the error in the tool-result channel (not the JSON-RPC
+/// error channel) because clients — including Claude Desktop — often
+/// surface protocol errors as a generic "failed to call tool" while
+/// faithfully passing tool-result content to the model.
+fn domain_error_to_result(e: Error) -> CallToolResult {
     let category = e.category();
     let kind = e.kind();
     let message = e.to_string();
+    let hint = e.hint();
 
     // Log every error that crosses the MCP boundary, tagged with kind +
-    // category. This is the cheapest way to see error patterns over time
-    // (grep mcp-server-vcf-mcp.log for `error_category=unexpected` etc.).
-    // Unexpected errors get a louder level so they stand out at info.
+    // category. Greppable via `error_category=unexpected` in
+    // mcp-server-vcf-mcp.log. Unexpected errors warn so they stand out.
     match category {
         Category::Unexpected => tracing::warn!(
             error_kind = kind,
@@ -366,23 +372,15 @@ fn map_domain_error(e: Error) -> McpError {
         ),
     }
 
-    // Attach structured triage data to the MCP error so Claude can decide
-    // whether to (a) help the user fix their input, (b) help them diagnose
-    // a data / environment issue, or (c) offer to file a bug report.
-    let data = Some(serde_json::json!({
-        "category": category.as_str(),
+    let mut payload = serde_json::json!({
         "kind": kind,
-    }));
-
-    match category {
-        // User-side input or data problem → invalid_params. Claude reads
-        // `category` to decide whether the user needs to fix args or check
-        // their file.
-        Category::UserInput | Category::UserData => McpError::invalid_params(message, data),
-        // Internal / unexpected → internal_error so the protocol-level
-        // signal also reflects severity.
-        Category::Unexpected => McpError::internal_error(message, data),
+        "category": category.as_str(),
+        "message": message,
+    });
+    if let Some(h) = hint {
+        payload["hint"] = serde_json::Value::String(h.to_string());
     }
+    CallToolResult::structured_error(payload)
 }
 
 #[tool_handler]

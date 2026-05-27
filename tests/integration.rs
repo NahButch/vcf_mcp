@@ -315,7 +315,37 @@ fn extract_text(resp: &Value) -> &str {
 }
 
 fn is_error_response(resp: &Value) -> bool {
-    resp["error"].is_object()
+    // Two valid shapes:
+    // 1. JSON-RPC error (legacy / truly internal failures)
+    // 2. tool result with isError: true (domain errors — what we now use)
+    resp["error"].is_object() || resp["result"]["isError"] == true
+}
+
+/// Pull the structured error payload regardless of which channel the error
+/// came back through. For the new tool-result-error path, the payload lives
+/// in `result.structuredContent` AND is duplicated as a JSON string in
+/// `result.content[0].text`.
+fn extract_error_payload(resp: &Value) -> Value {
+    if resp["error"].is_object() {
+        // Legacy JSON-RPC error: pull from error.data, falling back to the
+        // bare error object so older tests don't break.
+        if let Some(d) = resp["error"].get("data") {
+            return d.clone();
+        }
+        return resp["error"].clone();
+    }
+    // Tool-result error path. Prefer structuredContent if present (rmcp emits
+    // both when calling CallToolResult::structured_error); fall back to
+    // parsing content[0].text.
+    if let Some(sc) = resp["result"].get("structuredContent") {
+        if !sc.is_null() {
+            return sc.clone();
+        }
+    }
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error content in {resp}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("error payload not JSON: {text:?} ({e})"))
 }
 
 // ---------- tests ----------
@@ -485,17 +515,19 @@ async fn query_region_unknown_sample_errors() {
         is_error_response(&resp),
         "expected error response, got {resp}"
     );
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(
         msg.contains("NOPE"),
         "error should mention the bad sample name: {msg}"
     );
     // Triage data must surface so Claude can decide what kind of help to give.
     assert_eq!(
-        resp["error"]["data"]["category"], "user_input",
+        extract_error_payload(&resp)["category"],
+        "user_input",
         "SampleNotFound should be tagged user_input: {resp}"
     );
-    assert_eq!(resp["error"]["data"]["kind"], "SampleNotFound");
+    assert_eq!(extract_error_payload(&resp)["kind"], "SampleNotFound");
     h.shutdown().await;
 }
 
@@ -513,10 +545,11 @@ async fn add_sample_invalid_vcf_is_categorized_user_data() {
         .await;
     assert!(is_error_response(&resp));
     assert_eq!(
-        resp["error"]["data"]["category"], "user_data",
+        extract_error_payload(&resp)["category"],
+        "user_data",
         "InvalidVcfFile should be tagged user_data: {resp}"
     );
-    assert_eq!(resp["error"]["data"]["kind"], "InvalidVcfFile");
+    assert_eq!(extract_error_payload(&resp)["kind"], "InvalidVcfFile");
     h.shutdown().await;
 }
 
@@ -543,7 +576,8 @@ async fn query_region_too_large_errors() {
         )
         .await;
     assert!(is_error_response(&resp), "expected error response");
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(msg.contains("max") || msg.contains("region"), "msg: {msg}");
     h.shutdown().await;
 }
@@ -638,7 +672,8 @@ async fn lookup_rsids_too_many_errors() {
         .call_tool("lookup_rsids", json!({"sample": "NA12878", "rsids": rsids}))
         .await;
     assert!(is_error_response(&resp));
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(msg.contains("max") || msg.contains("100"), "msg: {msg}");
     h.shutdown().await;
 }
@@ -708,7 +743,8 @@ async fn query_gene_unknown_gene_errors_with_suggestion() {
         .call_tool("query_gene", json!({"sample": "NA12878", "gene": "BRCA22"}))
         .await;
     assert!(is_error_response(&resp));
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(
         msg.contains("BRCA22"),
         "msg should echo the bad symbol: {msg}"
@@ -754,7 +790,8 @@ async fn lookup_rsids_unknown_sample_errors() {
         .call_tool("lookup_rsids", json!({"sample": "NOPE", "rsids": ["rs1"]}))
         .await;
     assert!(is_error_response(&resp));
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(
         msg.contains("NOPE"),
         "error should mention bad sample: {msg}"
@@ -851,7 +888,8 @@ async fn compare_samples_too_few_errors() {
         )
         .await;
     assert!(is_error_response(&resp));
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(msg.contains('2'), "msg: {msg}");
     h.shutdown().await;
 }
@@ -963,7 +1001,8 @@ async fn add_sample_rejects_non_vcf_extension() {
         .call_tool("add_sample", json!({"path": path, "build": "GRCh38"}))
         .await;
     assert!(is_error_response(&resp));
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(
         msg.contains(".vcf.gz") || msg.contains("filename"),
         "msg: {msg}"
@@ -1048,8 +1087,9 @@ async fn reset_samples_without_confirm_errors() {
         .call_tool("reset_samples", json!({"confirm": false}))
         .await;
     assert!(is_error_response(&resp));
-    assert_eq!(resp["error"]["data"]["category"], "user_input");
-    assert_eq!(resp["error"]["data"]["kind"], "ResetNotConfirmed");
+    let payload = extract_error_payload(&resp);
+    assert_eq!(payload["category"], "user_input");
+    assert_eq!(payload["kind"], "ResetNotConfirmed");
     // Registry should still be populated.
     let list = h.call_tool("list_samples", json!({})).await;
     let samples: Vec<Value> = serde_json::from_str(extract_text(&list)).unwrap();
@@ -1085,7 +1125,7 @@ async fn reset_samples_with_confirm_wipes_registry() {
         )
         .await;
     assert!(is_error_response(&q));
-    assert_eq!(q["error"]["data"]["kind"], "SampleNotFound");
+    assert_eq!(extract_error_payload(&q)["kind"], "SampleNotFound");
     h.shutdown().await;
 }
 
@@ -1130,7 +1170,8 @@ async fn compare_samples_unknown_sample_errors() {
         )
         .await;
     assert!(is_error_response(&resp));
-    let msg = resp["error"]["message"].as_str().unwrap();
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
     assert!(
         msg.contains("GHOST"),
         "error should mention bad sample: {msg}"
