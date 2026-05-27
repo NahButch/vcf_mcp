@@ -1610,6 +1610,11 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
     tbi.push(".tbi");
     let tbi_path = std::path::PathBuf::from(tbi);
 
+    // The tabix index always lives in memory. If a `.tbi` happens to exist on
+    // disk (e.g. produced by a sequencing pipeline or our index_vcf example),
+    // we load it as a fast shortcut; otherwise we build the same index in
+    // memory by streaming the file. Both are normal — neither is an error or
+    // a fallback worth flagging.
     if tbi_path.exists() {
         let started = Instant::now();
         let result = tabix::fs::read(&tbi_path).map_err(|e| Error::InvalidVcfFile {
@@ -1619,10 +1624,11 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
         tracing::info!(
             perf = true,
             phase = "tabix_index",
-            event = "load_from_disk",
+            event = "ready",
+            source = "disk",
             vcf = %canonical.display(),
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "loaded existing .tbi from disk"
+            "tabix index ready (loaded a .tbi shortcut from disk)"
         );
         return result;
     }
@@ -1632,8 +1638,9 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
         perf = true,
         phase = "tabix_index",
         event = "build_start",
+        source = "memory",
         vcf = %canonical.display(),
-        "no .tbi found alongside VCF; building tabix index in memory"
+        "building in-memory tabix index"
     );
     let index = build_tabix_index_in_memory(canonical).map_err(|e| Error::InvalidVcfFile {
         path: canonical.to_path_buf(),
@@ -1642,10 +1649,11 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
     tracing::info!(
         perf = true,
         phase = "tabix_index",
-        event = "build_done",
+        event = "ready",
+        source = "memory",
         vcf = %canonical.display(),
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "built in-memory tabix index"
+        "tabix index ready (built in memory)"
     );
     Ok(index)
 }
