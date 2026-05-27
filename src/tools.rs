@@ -63,6 +63,7 @@ impl VcfServer {
         description = "Return the running server's identity: vcf-mcp version, embedded Ensembl gene-table release per build, and the current count of registered samples. Use this when the user asks what version they're talking to or what reference data is in play."
     )]
     async fn server_info(&self) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:server_info");
         tool_ok(&vcf::server_info(&self.registry))
     }
 
@@ -70,6 +71,7 @@ impl VcfServer {
         description = "List the VCF samples currently registered on this server. Returns name, genome build, description, and absolute vcf_path for each. Returns an empty list if no samples are registered yet — use add_sample to register one."
     )]
     async fn list_samples(&self) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:list_samples");
         let samples = self.registry.list();
         let summaries: Vec<SampleSummary<'_>> = samples.iter().map(SampleSummary::from).collect();
         tool_ok(&summaries)
@@ -82,6 +84,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<AddSampleParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:add_sample");
         let result = vcf::add_sample(
             self.registry.clone(),
             self.allowed_roots.clone(),
@@ -106,6 +109,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<AddSamplesFromFolderParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:add_samples_from_folder");
         into_tool_result(
             vcf::add_samples_from_folder(
                 self.registry.clone(),
@@ -127,6 +131,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<RemoveSampleParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:remove_sample");
         match vcf::remove_sample(self.registry.clone(), args.name.clone()).await {
             Ok(Some(s)) => tool_ok(&SampleSummary::from(&s)),
             Ok(None) => tool_ok(&serde_json::json!({"removed": false, "name": args.name})),
@@ -141,6 +146,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<ResetSamplesParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:reset_samples");
         if !args.confirm {
             return Ok(domain_error_to_result(Error::ResetNotConfirmed));
         }
@@ -154,6 +160,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<QueryRegionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:query_region");
         into_tool_result(
             vcf::query_region(
                 self.registry.clone(),
@@ -175,6 +182,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<QueryGeneParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:query_gene");
         into_tool_result(
             vcf::query_gene(
                 self.registry.clone(),
@@ -195,6 +203,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<CompareSamplesParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:compare_samples");
         let inner_query = match args.query {
             CompareQueryParams::Rsids { rsids } => CompareQuery::Rsids(rsids),
             CompareQueryParams::Region { chrom, start, end } => {
@@ -221,6 +230,7 @@ impl VcfServer {
         &self,
         Parameters(args): Parameters<LookupRsidsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:lookup_rsids");
         into_tool_result(
             vcf::lookup_rsids(
                 self.registry.clone(),
@@ -315,6 +325,41 @@ pub struct ResetSamplesParams {
     /// Drops every registered sample, all per-sample caches, and the
     /// persistent state file.
     pub confirm: bool,
+}
+
+/// RAII timer that emits a structured perf event on drop. Use at the top of
+/// any tool method or sub-stage; the event carries `perf=true` so the log
+/// can be filtered with a single grep (`grep perf=true mcp-server-vcf-mcp.log`).
+pub(crate) struct PerfTimer {
+    label: &'static str,
+    started: std::time::Instant,
+}
+
+impl PerfTimer {
+    pub(crate) fn start(label: &'static str) -> Self {
+        tracing::info!(
+            perf = true,
+            phase = label,
+            event = "start",
+            "perf phase started"
+        );
+        Self {
+            label,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for PerfTimer {
+    fn drop(&mut self) {
+        tracing::info!(
+            perf = true,
+            phase = self.label,
+            event = "end",
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "perf phase complete"
+        );
+    }
 }
 
 /// Helper: a successful tool result wrapping any Serialize value as its

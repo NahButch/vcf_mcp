@@ -583,6 +583,15 @@ async fn compare_by_rsids(
 
     let mut per_sample: HashMap<String, Vec<LookupRsidEntry>> = HashMap::new();
     for name in samples {
+        let sub_started = Instant::now();
+        tracing::info!(
+            perf = true,
+            phase = "compare:subcall",
+            event = "start",
+            sample = %name,
+            rsid_count = rsids.len(),
+            "compare_samples per-sample subcall begin"
+        );
         let resp = lookup_rsids(
             registry.clone(),
             cache.clone(),
@@ -592,6 +601,16 @@ async fn compare_by_rsids(
             },
         )
         .await?;
+        tracing::info!(
+            perf = true,
+            phase = "compare:subcall",
+            event = "end",
+            sample = %name,
+            rsid_count = rsids.len(),
+            found_count = resp.found_count,
+            elapsed_ms = sub_started.elapsed().as_millis() as u64,
+            "compare_samples per-sample subcall complete"
+        );
         per_sample.insert(name.clone(), resp.results);
     }
 
@@ -777,9 +796,25 @@ pub async fn lookup_rsids(
 
 async fn ensure_rsid_index(cache: &RsidCache, sample: &Sample) -> Result<Arc<RsidIndex>> {
     if let Some(idx) = cache.get(&sample.name) {
+        tracing::info!(
+            perf = true,
+            phase = "rsid_cache",
+            event = "hit",
+            sample = %sample.name,
+            entries = idx.len(),
+            "rsid cache hit"
+        );
         return Ok(idx);
     }
     let path = sample.vcf_path.clone();
+    tracing::info!(
+        perf = true,
+        phase = "rsid_cache",
+        event = "build_start",
+        sample = %sample.name,
+        vcf = %path.display(),
+        "rsid cache miss; streaming VCF to build index"
+    );
     let started = Instant::now();
     let result = tokio::task::spawn_blocking(move || build_rsid_index(&path))
         .await
@@ -793,11 +828,16 @@ async fn ensure_rsid_index(cache: &RsidCache, sample: &Sample) -> Result<Arc<Rsi
         })?;
     let entries = result.len();
     let elapsed = started.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64().max(0.001);
     tracing::info!(
+        perf = true,
+        phase = "rsid_cache",
+        event = "build_done",
         sample = %sample.name,
         entries = entries,
         elapsed_ms = elapsed.as_millis() as u64,
-        "built rsid cache"
+        rate_per_sec = (entries as f64 / elapsed_secs) as u64,
+        "rsid cache built"
     );
     let arc = Arc::new(result);
     cache.set(sample.name.clone(), arc.clone());
@@ -812,6 +852,9 @@ fn build_rsid_index(path: &Path) -> std::io::Result<RsidIndex> {
     let mut reader = bgzf::io::Reader::new(File::open(path)?);
     let mut idx = HashMap::new();
     let mut buf = String::new();
+    let started = Instant::now();
+    let mut records: u64 = 0;
+    let mut last_checkpoint = started;
     loop {
         buf.clear();
         if reader.read_line(&mut buf)? == 0 {
@@ -819,6 +862,23 @@ fn build_rsid_index(path: &Path) -> std::io::Result<RsidIndex> {
         }
         if buf.starts_with('#') {
             continue;
+        }
+        records += 1;
+        // Heartbeat every ~2 seconds — if you see one of these in the log
+        // followed by silence, the next records that were being read are
+        // where the hang is.
+        if records % 500_000 == 0 && last_checkpoint.elapsed().as_secs() >= 2 {
+            let secs = started.elapsed().as_secs_f64().max(0.001);
+            tracing::info!(
+                perf = true,
+                phase = "rsid_cache",
+                event = "build_progress",
+                records = records,
+                rsids_so_far = idx.len(),
+                rate_per_sec = (records as f64 / secs) as u64,
+                "still building rsid cache"
+            );
+            last_checkpoint = Instant::now();
         }
         let mut it = buf.splitn(4, '\t');
         let chrom = match it.next() {
@@ -862,16 +922,30 @@ fn lookup_rsids_blocking(
     idx: &RsidIndex,
     rsids: &[String],
 ) -> Result<Vec<LookupRsidEntry>> {
+    let started = Instant::now();
     let vcf_path = sample.vcf_path.as_path();
     let mut reader = open_indexed_reader_with_cache(registry, sample)?;
     let header = reader.read_header().map_err(|e| Error::VcfRead {
         path: vcf_path.to_path_buf(),
         message: e.to_string(),
     })?;
+    let setup_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(
+        perf = true,
+        phase = "lookup_rsids:setup",
+        sample = %sample.name,
+        rsid_count = rsids.len(),
+        elapsed_ms = setup_ms,
+        "indexed reader open + header read"
+    );
 
+    let queries_started = Instant::now();
+    let mut hits = 0usize;
+    let mut misses = 0usize;
     let mut out = Vec::with_capacity(rsids.len());
     for rsid in rsids {
         let Some(loc) = idx.get(rsid) else {
+            misses += 1;
             out.push(LookupRsidEntry {
                 rsid: rsid.clone(),
                 found: false,
@@ -904,12 +978,29 @@ fn lookup_rsids_blocking(
                 break;
             }
         }
+        if matched.is_some() {
+            hits += 1;
+        } else {
+            misses += 1;
+        }
         out.push(LookupRsidEntry {
             rsid: rsid.clone(),
             found: matched.is_some(),
             variant: matched,
         });
     }
+    let queries_ms = queries_started.elapsed().as_millis() as u64;
+    tracing::info!(
+        perf = true,
+        phase = "lookup_rsids:queries",
+        sample = %sample.name,
+        rsid_count = rsids.len(),
+        hits = hits,
+        misses = misses,
+        elapsed_ms = queries_ms,
+        avg_ms_per_rsid = (queries_ms as f64 / rsids.len().max(1) as f64) as u64,
+        "per-rsid tabix queries complete"
+    );
     Ok(out)
 }
 
@@ -1357,14 +1448,27 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
     let tbi_path = std::path::PathBuf::from(tbi);
 
     if tbi_path.exists() {
-        return tabix::fs::read(&tbi_path).map_err(|e| Error::InvalidVcfFile {
+        let started = Instant::now();
+        let result = tabix::fs::read(&tbi_path).map_err(|e| Error::InvalidVcfFile {
             path: canonical.to_path_buf(),
             reason: format!("loading existing .tbi: {e}"),
         });
+        tracing::info!(
+            perf = true,
+            phase = "tabix_index",
+            event = "load_from_disk",
+            vcf = %canonical.display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "loaded existing .tbi from disk"
+        );
+        return result;
     }
 
     let started = Instant::now();
     tracing::info!(
+        perf = true,
+        phase = "tabix_index",
+        event = "build_start",
         vcf = %canonical.display(),
         "no .tbi found alongside VCF; building tabix index in memory"
     );
@@ -1373,6 +1477,9 @@ fn acquire_tabix_index(canonical: &std::path::Path) -> Result<noodles_tabix::Ind
         reason: format!("tabix index build failed: {e}"),
     })?;
     tracing::info!(
+        perf = true,
+        phase = "tabix_index",
+        event = "build_done",
         vcf = %canonical.display(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "built in-memory tabix index"
