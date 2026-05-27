@@ -158,7 +158,17 @@ async fn serve_stdio(
     registry: Arc<SampleRegistry>,
     allowed_roots: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let server = VcfServer::new(registry, allowed_roots);
+    use std::sync::Arc;
+    let rsid_cache = Arc::new(vcf::RsidCache::default());
+
+    // Kick off background warmup BEFORE serving so the cold-cache cost
+    // doesn't land on the first tool call (which would otherwise risk
+    // exceeding Claude Desktop's stdio request timeout → pipe teardown
+    // → respawn → cold caches again). See warmup_samples_in_background
+    // doc comment for the full story.
+    vcf::warmup_samples_in_background(registry.clone(), rsid_cache.clone());
+
+    let server = VcfServer::new(registry, rsid_cache, allowed_roots);
     tracing::info!("starting MCP server on stdio");
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

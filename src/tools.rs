@@ -50,10 +50,14 @@ impl<'a> From<&'a Sample> for SampleSummary<'a> {
 
 #[tool_router]
 impl VcfServer {
-    pub fn new(registry: Arc<SampleRegistry>, allowed_roots: Vec<PathBuf>) -> Self {
+    pub fn new(
+        registry: Arc<SampleRegistry>,
+        rsid_cache: Arc<RsidCache>,
+        allowed_roots: Vec<PathBuf>,
+    ) -> Self {
         Self {
             registry,
-            rsid_cache: Arc::new(RsidCache::default()),
+            rsid_cache,
             allowed_roots: Arc::new(allowed_roots),
             tool_router: Self::tool_router(),
         }

@@ -1067,6 +1067,115 @@ pub struct ResetSamplesResponse {
     pub removed: Vec<Sample>,
 }
 
+/// Kick off background warmup for every currently-registered sample.
+///
+/// Returns immediately. Spawns one task per sample which:
+/// 1. Acquires the tabix index (loads `.tbi` from disk if present, builds in
+///    memory otherwise) and caches it on the registry.
+/// 2. Builds the rsid → position cache and stores it on the rsid_cache.
+///
+/// Why this matters: on a cold start (server respawn after Claude Desktop's
+/// stdio timeout, or first run after `add_sample`), the first tool call that
+/// needs a cache blocks for ~4 s per sample while the cache builds. For 2-3
+/// samples that's >10 s, which can exceed the MCP client's request timeout
+/// → client kills the pipe → respawn → cold caches again → death spiral.
+///
+/// By doing the work in the background as soon as the server starts, the
+/// first user-driven tool call (typically list_samples / server_info / a
+/// region query) returns instantly; by the time the user issues a big
+/// `compare_samples` or `lookup_rsids`, the caches are usually warm.
+///
+/// Warmup errors are logged but don't propagate — startup must always
+/// succeed even if e.g. a previously-registered VCF was deleted off disk.
+pub fn warmup_samples_in_background(registry: Arc<SampleRegistry>, rsid_cache: Arc<RsidCache>) {
+    tokio::spawn(async move {
+        let samples = registry.list();
+        let total = samples.len();
+        if total == 0 {
+            tracing::info!(
+                perf = true,
+                phase = "warmup",
+                event = "skip",
+                "no registered samples to warm up"
+            );
+            return;
+        }
+        tracing::info!(
+            perf = true,
+            phase = "warmup",
+            event = "all_start",
+            sample_count = total,
+            "background sample warmup begin"
+        );
+        let started = Instant::now();
+        for sample in samples {
+            warmup_one_sample(&registry, &rsid_cache, &sample).await;
+        }
+        tracing::info!(
+            perf = true,
+            phase = "warmup",
+            event = "all_end",
+            sample_count = total,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "background sample warmup complete"
+        );
+    });
+}
+
+async fn warmup_one_sample(registry: &SampleRegistry, rsid_cache: &RsidCache, sample: &Sample) {
+    let started = Instant::now();
+    tracing::info!(
+        perf = true,
+        phase = "warmup",
+        event = "sample_start",
+        sample = %sample.name,
+        "warming caches for sample"
+    );
+
+    // Tabix index: skip if already cached. Errors warn-log but don't abort
+    // — a missing or unreadable VCF here just means the user gets the real
+    // error the next time they query this sample.
+    if registry.get_tabix_index(&sample.name).is_none() {
+        let path = sample.vcf_path.clone();
+        let name = sample.name.clone();
+        let result = tokio::task::spawn_blocking(move || acquire_tabix_index(&path)).await;
+        match result {
+            Ok(Ok(idx)) => registry.set_tabix_index(name, Arc::new(idx)),
+            Ok(Err(e)) => tracing::warn!(
+                perf = true,
+                phase = "warmup",
+                event = "tabix_failed",
+                sample = %sample.name,
+                error = %e,
+                "tabix index warmup failed (continuing — query path will retry)"
+            ),
+            Err(e) => tracing::warn!(
+                perf = true,
+                phase = "warmup",
+                event = "tabix_panicked",
+                sample = %sample.name,
+                error = %e,
+                "tabix index warmup task panicked"
+            ),
+        }
+    }
+
+    // RSID cache: skip if already populated. ensure_rsid_index emits its own
+    // perf events and logs errors; we just want the side-effect of warming.
+    if rsid_cache.get(&sample.name).is_none() {
+        let _ = ensure_rsid_index(rsid_cache, sample).await;
+    }
+
+    tracing::info!(
+        perf = true,
+        phase = "warmup",
+        event = "sample_end",
+        sample = %sample.name,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "sample warmup complete"
+    );
+}
+
 #[derive(Debug, Serialize)]
 pub struct ServerLimits {
     pub max_region_bp: u64,
