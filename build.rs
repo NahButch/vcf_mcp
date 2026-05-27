@@ -9,7 +9,17 @@
 use std::process::Command;
 
 fn main() {
+    // HEAD changes on branch switches.
     println!("cargo:rerun-if-changed=.git/HEAD");
+    // And track the file the current HEAD ref points to — that's what
+    // updates on every commit to the current branch. HEAD typically reads
+    // "ref: refs/heads/main\n"; for a detached HEAD it's a raw SHA and the
+    // earlier `.git/HEAD` watch already covers it.
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(rest) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{rest}");
+        }
+    }
 
     let commit_count = run_git(&["rev-list", "--count", "HEAD"]).unwrap_or_else(|| "0".to_string());
 
