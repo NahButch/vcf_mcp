@@ -18,8 +18,19 @@ use crate::config::Config;
 use crate::registry::{SampleRegistry, default_state_path};
 use crate::tools::VcfServer;
 
+// Composite version shown by `--version`. Includes Cargo's semver + the git
+// commit count (build number) + short SHA so the running binary is uniquely
+// identifiable from the command line alone.
+const FULL_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+build.",
+    env!("VCF_MCP_BUILD"),
+    ".",
+    env!("VCF_MCP_COMMIT"),
+);
+
 #[derive(Parser)]
-#[command(name = "vcf-mcp", version, about = "MCP server for querying VCF files")]
+#[command(name = "vcf-mcp", version = FULL_VERSION, about = "MCP server for querying VCF files")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

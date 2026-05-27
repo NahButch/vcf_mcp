@@ -977,24 +977,59 @@ pub struct ResetSamplesResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ServerLimits {
+    pub max_region_bp: u64,
+    pub max_records_per_query: usize,
+    pub max_rsids_per_lookup: usize,
+    pub folder_default_max_files: usize,
+    pub folder_hard_cap_files: usize,
+    pub query_timeout_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ServerInfoResponse {
     pub name: &'static str,
+    /// Semver from Cargo.toml.
     pub version: &'static str,
+    /// Monotonic build counter — git commit count when built from a git
+    /// checkout, otherwise 0.
+    pub build: &'static str,
+    /// Short git SHA of the commit this binary was built from, or "unknown".
+    pub commit: &'static str,
+    /// Human-friendly composite, e.g. "vcf-mcp 0.1.0+build.42.83f78b1".
+    pub version_string: String,
     pub ensembl_release_grch38: u32,
     pub ensembl_release_grch37: u32,
     pub registered_samples: usize,
+    pub limits: ServerLimits,
 }
 
 /// Snapshot of the running server's identity and state, exposed as a tool so
-/// the LLM can answer "what version are you?" / "which gene table?" / "how
-/// many samples do you have registered?" without guessing.
+/// the LLM can answer "what version are you?" / "which gene table?" / "what
+/// are the limits?" without guessing.
 pub fn server_info(registry: &SampleRegistry) -> ServerInfoResponse {
+    let name = env!("CARGO_PKG_NAME");
+    let version = env!("CARGO_PKG_VERSION");
+    let build = env!("VCF_MCP_BUILD");
+    let commit = env!("VCF_MCP_COMMIT");
+    let version_string = format!("{name} {version}+build.{build}.{commit}");
     ServerInfoResponse {
-        name: env!("CARGO_PKG_NAME"),
-        version: env!("CARGO_PKG_VERSION"),
+        name,
+        version,
+        build,
+        commit,
+        version_string,
         ensembl_release_grch38: crate::genes::ENSEMBL_RELEASE_GRCH38,
         ensembl_release_grch37: crate::genes::ENSEMBL_RELEASE_GRCH37,
         registered_samples: registry.len(),
+        limits: ServerLimits {
+            max_region_bp: MAX_REGION_BP,
+            max_records_per_query: MAX_RECORDS,
+            max_rsids_per_lookup: MAX_RSIDS_PER_LOOKUP,
+            folder_default_max_files: FOLDER_DEFAULT_MAX,
+            folder_hard_cap_files: FOLDER_HARD_CAP,
+            query_timeout_secs: QUERY_TIMEOUT_SECS,
+        },
     }
 }
 

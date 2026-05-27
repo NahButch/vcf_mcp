@@ -331,6 +331,19 @@ async fn server_info_reports_version_and_state() {
     assert_eq!(body["ensembl_release_grch37"], 87);
     // Harness boots with 2 samples from the TOML import fixture.
     assert_eq!(body["registered_samples"], 2);
+    // Build info: don't pin the exact build number (moves with every commit),
+    // just confirm both fields are present and non-empty.
+    assert!(body["build"].is_string(), "expected build field: {body}");
+    assert!(body["commit"].is_string(), "expected commit field: {body}");
+    let vs = body["version_string"].as_str().unwrap();
+    assert!(
+        vs.contains("vcf-mcp ") && vs.contains("+build."),
+        "version_string shape unexpected: {vs}"
+    );
+    // Limits
+    assert_eq!(body["limits"]["max_region_bp"], 10_000_000);
+    assert_eq!(body["limits"]["max_records_per_query"], 500);
+    assert_eq!(body["limits"]["max_rsids_per_lookup"], 100);
     h.shutdown().await;
 }
 
