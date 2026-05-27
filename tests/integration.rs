@@ -77,6 +77,122 @@ fn annotate_rsids_to_file(src: &Path, dst: &Path) -> anyhow::Result<u32> {
     Ok(record_idx)
 }
 
+// Preprocess an Ensembl GTF into the compact gene-coordinate TSV that gets
+// embedded into the binary via `include_str!`. Filters to feature=gene
+// + gene_biotype=protein_coding, drops gene symbols that map to more than
+// one Ensembl ID (paralog ambiguity), and sorts by chrom then position.
+fn preprocess_gtf(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    use std::collections::{HashMap, HashSet};
+    use std::io::{BufRead as _, BufReader};
+
+    #[derive(Clone)]
+    struct Row {
+        chrom: String,
+        start: u32,
+        end: u32,
+        strand: char,
+        gene_id: String,
+    }
+
+    let f = File::open(src)?;
+    let gz = flate2::read::GzDecoder::new(f);
+    let reader = BufReader::new(gz);
+
+    let mut by_name: HashMap<String, Vec<Row>> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 9 {
+            continue;
+        }
+        if parts[2] != "gene" {
+            continue;
+        }
+        let attributes = parts[8];
+        if !attributes.contains("gene_biotype \"protein_coding\"") {
+            continue;
+        }
+        let Some(gene_name) = extract_attr(attributes, "gene_name") else {
+            continue;
+        };
+        let Some(gene_id) = extract_attr(attributes, "gene_id") else {
+            continue;
+        };
+        let chrom = parts[0].to_string();
+        let Ok(start) = parts[3].parse::<u32>() else {
+            continue;
+        };
+        let Ok(end) = parts[4].parse::<u32>() else {
+            continue;
+        };
+        let strand = parts[6].chars().next().unwrap_or('.');
+
+        by_name.entry(gene_name).or_default().push(Row {
+            chrom,
+            start,
+            end,
+            strand,
+            gene_id,
+        });
+    }
+
+    let mut out: Vec<(String, Row)> = Vec::with_capacity(by_name.len());
+    for (name, rows) in by_name {
+        let unique_ids: HashSet<&str> = rows.iter().map(|r| r.gene_id.as_str()).collect();
+        if unique_ids.len() != 1 {
+            continue; // ambiguous symbol — multiple Ensembl IDs share this name
+        }
+        out.push((name, rows.into_iter().next().unwrap()));
+    }
+    out.sort_by(|a, b| {
+        a.1.chrom
+            .cmp(&b.1.chrom)
+            .then(a.1.start.cmp(&b.1.start))
+            .then(a.0.cmp(&b.0))
+    });
+
+    let mut w = std::io::BufWriter::new(File::create(dst)?);
+    writeln!(w, "gene_symbol\tchrom\tstart\tend\tstrand\tensembl_id")?;
+    for (name, r) in &out {
+        writeln!(
+            w,
+            "{name}\t{}\t{}\t{}\t{}\t{}",
+            r.chrom, r.start, r.end, r.strand, r.gene_id
+        )?;
+    }
+    w.flush()?;
+    eprintln!("Wrote {} genes to {}", out.len(), dst.display());
+    Ok(())
+}
+
+fn extract_attr(attributes: &str, key: &str) -> Option<String> {
+    let pat = format!("{key} \"");
+    let i = attributes.find(&pat)?;
+    let start = i + pat.len();
+    let rel_end = attributes[start..].find('"')?;
+    Some(attributes[start..start + rel_end].to_string())
+}
+
+#[test]
+#[ignore = "run explicitly: cargo test --release -- --ignored generate_gene_tables"]
+fn generate_gene_tables() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    preprocess_gtf(
+        &root.join("data/ensembl/GRCh38.115.gtf.gz"),
+        &root.join("data/genes_grch38.tsv"),
+    )
+    .expect("GRCh38 preprocess");
+    preprocess_gtf(
+        &root.join("data/ensembl/GRCh37.87.gtf.gz"),
+        &root.join("data/genes_grch37.tsv"),
+    )
+    .expect("GRCh37 preprocess");
+}
+
 #[test]
 #[ignore = "run explicitly: cargo test --release -- --ignored generate_rsid_fixture"]
 fn generate_rsid_fixture() {
@@ -462,6 +578,110 @@ async fn lookup_rsids_too_many_errors() {
     assert!(is_error_response(&resp));
     let msg = resp["error"]["message"].as_str().unwrap();
     assert!(msg.contains("max") || msg.contains("100"), "msg: {msg}");
+    h.shutdown().await;
+}
+
+// ---------- query_gene ----------
+
+#[tokio::test]
+async fn query_gene_col1a1_against_slice() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool("query_gene", json!({"sample": "NA12878", "gene": "COL1A1"}))
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["gene"], "COL1A1");
+    assert_eq!(body["build"], "GRCh38");
+    assert_eq!(body["ensembl_id"], "ENSG00000108821");
+    assert_eq!(body["flank_bp"], 0);
+    // Gene coords come from the embedded table — chrom in the table is bare "17"
+    // but the response.chrom is normalized to whatever the file uses ("chr17").
+    assert_eq!(body["chrom"], "chr17");
+    let start = body["start"].as_u64().unwrap();
+    let end = body["end"].as_u64().unwrap();
+    assert!(
+        start >= 50_180_000 && end <= 50_205_000,
+        "coords: {start}-{end}"
+    );
+    assert!(
+        body["count"].as_u64().unwrap() > 0,
+        "expected variants in COL1A1"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_gene_with_flank_expands_window() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let r0 = h
+        .call_tool(
+            "query_gene",
+            json!({"sample": "NA12878", "gene": "COL1A1", "flank_bp": 0}),
+        )
+        .await;
+    let r1 = h
+        .call_tool(
+            "query_gene",
+            json!({"sample": "NA12878", "gene": "COL1A1", "flank_bp": 5000}),
+        )
+        .await;
+    let b0: Value = serde_json::from_str(extract_text(&r0)).unwrap();
+    let b1: Value = serde_json::from_str(extract_text(&r1)).unwrap();
+    // Gene coords reported should be identical (they're the gene's, not the window's).
+    assert_eq!(b0["start"], b1["start"]);
+    assert_eq!(b0["end"], b1["end"]);
+    // But the variant count with flank should be >= without.
+    assert!(
+        b1["count"].as_u64().unwrap() >= b0["count"].as_u64().unwrap(),
+        "flanked count should not decrease"
+    );
+    assert_eq!(b1["flank_bp"], 5000);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_gene_unknown_gene_errors_with_suggestion() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool("query_gene", json!({"sample": "NA12878", "gene": "BRCA22"}))
+        .await;
+    assert!(is_error_response(&resp));
+    let msg = resp["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("BRCA22"),
+        "msg should echo the bad symbol: {msg}"
+    );
+    // Distance-1: "BRCA22" → "BRCA2" should be in suggestions
+    assert!(
+        msg.contains("BRCA2") || msg.contains("Did you mean"),
+        "expected a suggestion: {msg}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_gene_case_insensitive() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool("query_gene", json!({"sample": "NA12878", "gene": "col1a1"}))
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    // Canonical case from the table
+    assert_eq!(body["gene"], "COL1A1");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_gene_gene_outside_slice_returns_empty() {
+    // BRCA1 is on chr17 too but well outside the 50.1–50.3 Mbp slice.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool("query_gene", json!({"sample": "NA12878", "gene": "BRCA1"}))
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["gene"], "BRCA1");
+    assert_eq!(body["count"], 0);
+    assert_eq!(body["variants"].as_array().unwrap().len(), 0);
     h.shutdown().await;
 }
 

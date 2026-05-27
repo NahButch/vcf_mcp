@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod genes;
 mod tools;
 mod vcf;
 

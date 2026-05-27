@@ -67,6 +67,9 @@ pub enum Error {
     #[error("rsids list is empty")]
     EmptyRsidList,
 
+    #[error("{0}")]
+    GeneNotFound(String),
+
     #[error("failed to open VCF {path}: {source}")]
     VcfOpen {
         path: PathBuf,

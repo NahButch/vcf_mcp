@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Sample};
 use crate::error::Error;
-use crate::vcf::{self, LookupRsidsArgs, QueryRegionArgs, RsidCache};
+use crate::vcf::{self, LookupRsidsArgs, QueryGeneArgs, QueryRegionArgs, RsidCache};
 
 #[derive(Clone)]
 pub struct VcfServer {
@@ -87,6 +87,28 @@ impl VcfServer {
     }
 
     #[tool(
+        description = "Return variants in a gene's coordinates using the embedded Ensembl 115 (GRCh38) / 87 (GRCh37) gene table. Gene symbol is case-insensitive HGNC (e.g. COL1A1, brca1). Optional `flank_bp` extends the queried window on each side. If the gene is unknown, the error suggests close matches."
+    )]
+    async fn query_gene(
+        &self,
+        Parameters(args): Parameters<QueryGeneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = vcf::query_gene(
+            self.config.clone(),
+            QueryGeneArgs {
+                sample: args.sample,
+                gene: args.gene,
+                flank_bp: args.flank_bp,
+            },
+        )
+        .await
+        .map_err(map_domain_error)?;
+        let payload = serde_json::to_string(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
         description = "Look up variants by dbSNP rsid. First call against a sample triggers a one-time cache build (streams the full VCF, takes seconds-to-minutes depending on file size). Returns one entry per input rsid in input order; entries not found yield {rsid, found: false}. Maximum 100 rsids per call."
     )]
     async fn lookup_rsids(
@@ -129,6 +151,16 @@ pub struct LookupRsidsParams {
     pub rsids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct QueryGeneParams {
+    /// Sample name as configured on the server.
+    pub sample: String,
+    /// HGNC gene symbol, case-insensitive (e.g. "COL1A1").
+    pub gene: String,
+    /// Optional flank in base pairs added to each side of the gene's coords.
+    pub flank_bp: Option<u32>,
+}
+
 fn map_domain_error(e: Error) -> McpError {
     match e {
         Error::SampleNotFound(_)
@@ -136,7 +168,8 @@ fn map_domain_error(e: Error) -> McpError {
         | Error::InvalidRange { .. }
         | Error::RegionTooLarge { .. }
         | Error::EmptyRsidList
-        | Error::TooManyRsids { .. } => McpError::invalid_params(e.to_string(), None),
+        | Error::TooManyRsids { .. }
+        | Error::GeneNotFound(_) => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
 }

@@ -316,6 +316,89 @@ fn compute_genotype_alleles(gt: &str, ref_bases: &str, alt_csv: &str) -> String 
     out
 }
 
+// ---------- query_gene ----------
+
+#[derive(Debug, Clone)]
+pub struct QueryGeneArgs {
+    pub sample: String,
+    pub gene: String,
+    pub flank_bp: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueryGeneResponse {
+    pub gene: String,
+    pub ensembl_id: String,
+    pub chrom: String,
+    pub start: u32,
+    pub end: u32,
+    pub build: String,
+    pub flank_bp: u32,
+    pub count: usize,
+    pub truncated: bool,
+    pub variants: Vec<VariantRecord>,
+}
+
+pub async fn query_gene(cfg: Arc<Config>, args: QueryGeneArgs) -> Result<QueryGeneResponse> {
+    let sample = cfg
+        .samples
+        .iter()
+        .find(|s| s.name == args.sample)
+        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?
+        .clone();
+
+    let table = crate::genes::table_for(&sample.build).ok_or_else(|| Error::InvalidBuild {
+        sample: sample.name.clone(),
+        build: sample.build.clone(),
+    })?;
+
+    let gene = match table.lookup(&args.gene) {
+        Some(g) => g.clone(),
+        None => {
+            let suggestions = table.suggestions(&args.gene, 3);
+            let msg = if suggestions.is_empty() {
+                format!("gene {:?} not found in {}", args.gene, sample.build)
+            } else {
+                format!(
+                    "gene {:?} not found in {}. Did you mean: {}?",
+                    args.gene,
+                    sample.build,
+                    suggestions.join(", ")
+                )
+            };
+            return Err(Error::GeneNotFound(msg));
+        }
+    };
+
+    let flank = args.flank_bp.unwrap_or(0);
+    let start = gene.start.saturating_sub(flank).max(1);
+    let end = gene.end.saturating_add(flank);
+
+    let region_response = query_region(
+        cfg.clone(),
+        QueryRegionArgs {
+            sample: args.sample.clone(),
+            chrom: gene.chrom.clone(),
+            start,
+            end,
+        },
+    )
+    .await?;
+
+    Ok(QueryGeneResponse {
+        gene: gene.symbol,
+        ensembl_id: gene.ensembl_id,
+        chrom: region_response.chrom,
+        start: gene.start,
+        end: gene.end,
+        build: sample.build,
+        flank_bp: flank,
+        count: region_response.count,
+        truncated: region_response.truncated,
+        variants: region_response.variants,
+    })
+}
+
 // ---------- lookup_rsids ----------
 
 #[derive(Debug, Clone)]

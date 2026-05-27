@@ -15,8 +15,9 @@ Cargo.lock.bak
 /config.toml
 config.local.toml
 
-# Downloaded reference / test data (committed slices are kept; large dumps ignored)
-/data/
+# Downloaded reference data (committed tables + slices are kept; raw dumps ignored)
+data/raw/
+data/ensembl/
 *.vcf.gz
 *.vcf.gz.tbi
 *.gtf.gz
