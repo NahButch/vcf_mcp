@@ -176,6 +176,24 @@ impl SampleRegistry {
         Ok(Some(sample))
     }
 
+    /// Drop every registered sample and clear the on-disk state file.
+    /// Returns the removed entries so the caller can log them, mirror them
+    /// elsewhere, or re-register a different set as part of a workflow.
+    pub fn clear(&self) -> Result<Vec<Sample>> {
+        let removed = {
+            let mut inner = self.inner.lock().unwrap();
+            let removed: Vec<Sample> = inner.by_name.values().cloned().collect();
+            inner.by_name.clear();
+            inner.by_path.clear();
+            removed
+        };
+        if let Ok(mut w) = self.tabix_cache.write() {
+            w.clear();
+        }
+        self.persist()?;
+        Ok(removed)
+    }
+
     fn persist(&self) -> Result<()> {
         let Some(path) = &self.state_path else {
             return Ok(());

@@ -694,6 +694,12 @@ impl RsidCache {
             .map(|r| r.contains_key(sample))
             .unwrap_or(false)
     }
+
+    pub fn clear(&self) {
+        if let Ok(mut w) = self.inner.write() {
+            w.clear();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -962,6 +968,40 @@ pub async fn remove_sample(registry: Arc<SampleRegistry>, name: String) -> Resul
             path: std::path::PathBuf::new(),
             reason: format!("join: {e}"),
         })?
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResetSamplesResponse {
+    pub removed_count: usize,
+    pub removed: Vec<Sample>,
+}
+
+/// Wipe the registry: drop all samples, clear caches, and rewrite the state
+/// file as empty. Useful for workflow / cowork steps ("clean slate before
+/// re-registering"). Destructive — caller must pass `confirm=true` upstream;
+/// this function trusts that the tool layer enforced it.
+pub async fn reset_samples(
+    registry: Arc<SampleRegistry>,
+    rsid_cache: Arc<RsidCache>,
+) -> Result<ResetSamplesResponse> {
+    let removed = tokio::task::spawn_blocking(move || {
+        let r = registry.clear()?;
+        rsid_cache.clear();
+        Ok::<Vec<Sample>, Error>(r)
+    })
+    .await
+    .map_err(|e| Error::StateFile {
+        path: std::path::PathBuf::new(),
+        message: format!("reset join: {e}"),
+    })??;
+    tracing::info!(
+        removed = removed.len(),
+        "registry reset (all samples and caches cleared)"
+    );
+    Ok(ResetSamplesResponse {
+        removed_count: removed.len(),
+        removed,
+    })
 }
 
 pub async fn add_samples_from_folder(

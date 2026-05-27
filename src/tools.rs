@@ -137,6 +137,24 @@ impl VcfServer {
     }
 
     #[tool(
+        description = "Reset the sample registry — drops every registered sample, the per-sample tabix and rsid caches, and rewrites the state file as empty. Destructive: requires `confirm: true`; refuses otherwise. Useful as a workflow / cowork step (clean slate before re-registering a new cohort, end-of-session cleanup, scheduled refresh). Returns the list of what was removed so the caller can mirror it elsewhere or re-register if needed."
+    )]
+    async fn reset_samples(
+        &self,
+        Parameters(args): Parameters<ResetSamplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if !args.confirm {
+            return Err(map_domain_error(Error::ResetNotConfirmed));
+        }
+        let resp = vcf::reset_samples(self.registry.clone(), self.rsid_cache.clone())
+            .await
+            .map_err(map_domain_error)?;
+        let payload = serde_json::to_string(&resp)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
         description = "Return variant calls overlapping a chromosome region. Coordinates are 1-based inclusive. Chromosome may be given with or without the 'chr' prefix; the server normalizes to the file's convention. Multi-allelic ALTs are comma-separated. The result is capped at 500 records; when more would match, `truncated` is true."
     )]
     async fn query_region(
@@ -306,6 +324,14 @@ pub struct RemoveSampleParams {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ResetSamplesParams {
+    /// Required acknowledgement. Must be `true`; the tool refuses otherwise.
+    /// Drops every registered sample, all per-sample caches, and the
+    /// persistent state file.
+    pub confirm: bool,
+}
+
 fn map_domain_error(e: Error) -> McpError {
     let category = e.category();
     let kind = e.kind();
@@ -356,7 +382,7 @@ impl ServerHandler for VcfServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "VCF query MCP server. To get started, call `add_sample` with a full file path, or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, or compare_samples. Use remove_sample to unregister.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).",
+                "VCF query MCP server. To get started, call `add_sample` with a full file path, or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, or compare_samples. Use remove_sample to unregister, or reset_samples (confirm=true required) to wipe the entire registry for a clean slate — useful as a workflow step.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).",
             )
     }
 }

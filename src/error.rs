@@ -113,6 +113,11 @@ pub enum Error {
 
     #[error("VCF read error in {path}: {message}")]
     VcfRead { path: PathBuf, message: String },
+
+    #[error(
+        "reset_samples is destructive and requires `confirm: true`; refusing to drop the registry without explicit consent"
+    )]
+    ResetNotConfirmed,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -165,7 +170,8 @@ impl Error {
             | Error::DuplicateSample(_)
             | Error::NoSamples
             | Error::InvalidBuild { .. }
-            | Error::PathNotAllowed { .. } => Category::UserInput,
+            | Error::PathNotAllowed { .. }
+            | Error::ResetNotConfirmed => Category::UserInput,
 
             // The user's filesystem / file content is the source of the
             // problem — corrupt download, missing file, malformed config.
@@ -215,6 +221,7 @@ impl Error {
             Error::StateFile { .. } => "StateFile",
             Error::VcfOpen { .. } => "VcfOpen",
             Error::VcfRead { .. } => "VcfRead",
+            Error::ResetNotConfirmed => "ResetNotConfirmed",
         }
     }
 }

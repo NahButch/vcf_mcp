@@ -1,0 +1,37 @@
+Add reset_samples tool for clean-slate workflows
+
+New MCP tool that drops every registered sample, clears the per-sample
+tabix and rsid caches, and rewrites the state file as empty. Designed
+to compose into Cowork workflows (e.g. "scheduled reset + re-register
+from a watched folder" or "switch projects without lingering state from
+the prior cohort").
+
+Safety: requires `confirm: true`. The tool returns ResetNotConfirmed
+(tagged user_input) otherwise, so an LLM can't accidentally nuke state
+by calling the tool with default args.
+
+Response shape:
+  { "removed_count": N, "removed": [Sample, ...] }
+
+so the caller can mirror what was removed elsewhere or re-register
+from a different source.
+
+Surface changes:
+- SampleRegistry::clear() — drops samples, tabix cache, persists empty
+  state. Returns the removed entries.
+- RsidCache::clear() — drops every cached rsid index.
+- vcf::reset_samples async wrapper coordinates both.
+- ResetNotConfirmed error variant in error.rs, categorized user_input.
+- Server `instructions` string mentions reset_samples in the
+  registration / cleanup overview.
+
+Tests: 2 new integration tests:
+- reset without confirm errors with the right category+kind, registry
+  intact afterward.
+- reset with confirm=true returns the previously-registered set,
+  list_samples is empty afterward, and a query against a previously-
+  registered sample now produces SampleNotFound.
+
+34 integration tests + unit tests all green; clippy clean.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>

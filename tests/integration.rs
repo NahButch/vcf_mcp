@@ -1015,6 +1015,54 @@ async fn remove_sample_works() {
 }
 
 #[tokio::test]
+async fn reset_samples_without_confirm_errors() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool("reset_samples", json!({"confirm": false}))
+        .await;
+    assert!(is_error_response(&resp));
+    assert_eq!(resp["error"]["data"]["category"], "user_input");
+    assert_eq!(resp["error"]["data"]["kind"], "ResetNotConfirmed");
+    // Registry should still be populated.
+    let list = h.call_tool("list_samples", json!({})).await;
+    let samples: Vec<Value> = serde_json::from_str(extract_text(&list)).unwrap();
+    assert!(!samples.is_empty(), "reset shouldn't have happened");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn reset_samples_with_confirm_wipes_registry() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    // Prior to reset, harness has 2 samples from the TOML import.
+    let list_before = h.call_tool("list_samples", json!({})).await;
+    let before: Vec<Value> = serde_json::from_str(extract_text(&list_before)).unwrap();
+    let before_n = before.len();
+    assert!(before_n >= 2);
+
+    let resp = h.call_tool("reset_samples", json!({"confirm": true})).await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["removed_count"].as_u64().unwrap() as usize, before_n);
+    let removed = body["removed"].as_array().unwrap();
+    assert_eq!(removed.len(), before_n);
+
+    // Registry should be empty now; subsequent queries should fail with
+    // SampleNotFound (user_input) for any previously-known name.
+    let list_after = h.call_tool("list_samples", json!({})).await;
+    let after: Vec<Value> = serde_json::from_str(extract_text(&list_after)).unwrap();
+    assert_eq!(after.len(), 0, "registry should be empty after reset");
+
+    let q = h
+        .call_tool(
+            "query_region",
+            json!({"sample": "NA12878", "chrom": "chr17", "start": 1, "end": 1000}),
+        )
+        .await;
+    assert!(is_error_response(&q));
+    assert_eq!(q["error"]["data"]["kind"], "SampleNotFound");
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn add_samples_from_folder_finds_the_slice() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
