@@ -12,7 +12,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::Sample;
-use crate::error::Error;
+use crate::error::{Category, Error};
 use crate::registry::SampleRegistry;
 use crate::vcf::{
     self, AddSampleArgs, AddSamplesFromFolderArgs, CompareQuery, CompareSamplesArgs,
@@ -307,23 +307,45 @@ pub struct RemoveSampleParams {
 }
 
 fn map_domain_error(e: Error) -> McpError {
-    match e {
-        Error::SampleNotFound(_)
-        | Error::InvalidChromosome { .. }
-        | Error::InvalidRange { .. }
-        | Error::RegionTooLarge { .. }
-        | Error::EmptyRsidList
-        | Error::TooManyRsids { .. }
-        | Error::GeneNotFound(_)
-        | Error::TooFewSamples { .. }
-        | Error::PathInvalid { .. }
-        | Error::PathNotAllowed { .. }
-        | Error::InvalidVcfFile { .. }
-        | Error::BuildNotDetectable { .. }
-        | Error::TooManyFiles { .. }
-        | Error::IndexMissing { .. }
-        | Error::InvalidBuild { .. } => McpError::invalid_params(e.to_string(), None),
-        _ => McpError::internal_error(e.to_string(), None),
+    let category = e.category();
+    let kind = e.kind();
+    let message = e.to_string();
+
+    // Log every error that crosses the MCP boundary, tagged with kind +
+    // category. This is the cheapest way to see error patterns over time
+    // (grep mcp-server-vcf-mcp.log for `error_category=unexpected` etc.).
+    // Unexpected errors get a louder level so they stand out at info.
+    match category {
+        Category::Unexpected => tracing::warn!(
+            error_kind = kind,
+            error_category = category.as_str(),
+            error_message = %message,
+            "tool returned an unexpected error"
+        ),
+        _ => tracing::info!(
+            error_kind = kind,
+            error_category = category.as_str(),
+            error_message = %message,
+            "tool returned an error"
+        ),
+    }
+
+    // Attach structured triage data to the MCP error so Claude can decide
+    // whether to (a) help the user fix their input, (b) help them diagnose
+    // a data / environment issue, or (c) offer to file a bug report.
+    let data = Some(serde_json::json!({
+        "category": category.as_str(),
+        "kind": kind,
+    }));
+
+    match category {
+        // User-side input or data problem → invalid_params. Claude reads
+        // `category` to decide whether the user needs to fix args or check
+        // their file.
+        Category::UserInput | Category::UserData => McpError::invalid_params(message, data),
+        // Internal / unexpected → internal_error so the protocol-level
+        // signal also reflects severity.
+        Category::Unexpected => McpError::internal_error(message, data),
     }
 }
 
@@ -334,7 +356,7 @@ impl ServerHandler for VcfServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "VCF query MCP server. To get started, call `add_sample` with a full file path, or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, or compare_samples. Use remove_sample to unregister.",
+                "VCF query MCP server. To get started, call `add_sample` with a full file path, or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, or compare_samples. Use remove_sample to unregister.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).",
             )
     }
 }

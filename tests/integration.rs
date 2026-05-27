@@ -463,6 +463,33 @@ async fn query_region_unknown_sample_errors() {
         msg.contains("NOPE"),
         "error should mention the bad sample name: {msg}"
     );
+    // Triage data must surface so Claude can decide what kind of help to give.
+    assert_eq!(
+        resp["error"]["data"]["category"], "user_input",
+        "SampleNotFound should be tagged user_input: {resp}"
+    );
+    assert_eq!(resp["error"]["data"]["kind"], "SampleNotFound");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_invalid_vcf_is_categorized_user_data() {
+    // Pointing add_sample at a real file that isn't a VCF (Cargo.toml) hits
+    // the filename-extension validation step → InvalidVcfFile → user_data.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("Cargo.toml")
+        .to_string_lossy()
+        .into_owned();
+    let resp = h
+        .call_tool("add_sample", json!({"path": path, "build": "GRCh38"}))
+        .await;
+    assert!(is_error_response(&resp));
+    assert_eq!(
+        resp["error"]["data"]["category"], "user_data",
+        "InvalidVcfFile should be tagged user_data: {resp}"
+    );
+    assert_eq!(resp["error"]["data"]["kind"], "InvalidVcfFile");
     h.shutdown().await;
 }
 
@@ -923,8 +950,8 @@ async fn add_sample_builds_index_in_memory_when_tbi_missing() {
     // succeed by building the tabix index in memory; no .tbi should appear
     // in the temp dir.
     let tmp = tempfile::tempdir().unwrap();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/na12878_chr17_slice.vcf.gz");
+    let src =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/na12878_chr17_slice.vcf.gz");
     let dst = tmp.path().join("no_tbi_here.vcf.gz");
     std::fs::copy(&src, &dst).unwrap();
     let dst_str = dst.to_string_lossy().into_owned();
