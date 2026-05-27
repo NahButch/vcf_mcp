@@ -21,8 +21,9 @@ use noodles_vcf::{
 };
 use serde::Serialize;
 
-use crate::config::{Config, Sample};
+use crate::config::Sample;
 use crate::error::{Error, Result};
+use crate::registry::{SampleRegistry, derive_name_from_path};
 
 const MAX_REGION_BP: u64 = 10_000_000;
 const MAX_RECORDS: usize = 500;
@@ -63,7 +64,10 @@ pub struct QueryRegionArgs {
     pub end: u32,
 }
 
-pub async fn query_region(cfg: Arc<Config>, args: QueryRegionArgs) -> Result<QueryRegionResponse> {
+pub async fn query_region(
+    registry: Arc<SampleRegistry>,
+    args: QueryRegionArgs,
+) -> Result<QueryRegionResponse> {
     if args.start > args.end {
         return Err(Error::InvalidRange {
             start: args.start,
@@ -78,12 +82,9 @@ pub async fn query_region(cfg: Arc<Config>, args: QueryRegionArgs) -> Result<Que
         });
     }
 
-    let sample = cfg
-        .samples
-        .iter()
-        .find(|s| s.name == args.sample)
-        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?
-        .clone();
+    let sample = registry
+        .get(&args.sample)
+        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?;
     let vcf_path = sample.vcf_path.clone();
 
     let timeout = Duration::from_secs(QUERY_TIMEOUT_SECS);
@@ -339,13 +340,13 @@ pub struct QueryGeneResponse {
     pub variants: Vec<VariantRecord>,
 }
 
-pub async fn query_gene(cfg: Arc<Config>, args: QueryGeneArgs) -> Result<QueryGeneResponse> {
-    let sample = cfg
-        .samples
-        .iter()
-        .find(|s| s.name == args.sample)
-        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?
-        .clone();
+pub async fn query_gene(
+    registry: Arc<SampleRegistry>,
+    args: QueryGeneArgs,
+) -> Result<QueryGeneResponse> {
+    let sample = registry
+        .get(&args.sample)
+        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?;
 
     let table = crate::genes::table_for(&sample.build).ok_or_else(|| Error::InvalidBuild {
         sample: sample.name.clone(),
@@ -375,7 +376,7 @@ pub async fn query_gene(cfg: Arc<Config>, args: QueryGeneArgs) -> Result<QueryGe
     let end = gene.end.saturating_add(flank);
 
     let region_response = query_region(
-        cfg.clone(),
+        registry.clone(),
         QueryRegionArgs {
             sample: args.sample.clone(),
             chrom: gene.chrom.clone(),
@@ -454,7 +455,7 @@ pub struct CompareSamplesResponse {
 }
 
 pub async fn compare_samples(
-    cfg: Arc<Config>,
+    registry: Arc<SampleRegistry>,
     cache: Arc<RsidCache>,
     args: CompareSamplesArgs,
 ) -> Result<CompareSamplesResponse> {
@@ -465,20 +466,22 @@ pub async fn compare_samples(
     }
     // Up-front sample existence check so we fail before doing any IO.
     for name in &args.samples {
-        if !cfg.samples.iter().any(|s| &s.name == name) {
+        if !registry.contains(name) {
             return Err(Error::SampleNotFound(name.clone()));
         }
     }
     match args.query.clone() {
         CompareQuery::Region { chrom, start, end } => {
-            compare_region(cfg, &args.samples, &chrom, start, end).await
+            compare_region(registry, &args.samples, &chrom, start, end).await
         }
-        CompareQuery::Rsids(rsids) => compare_by_rsids(cfg, cache, &args.samples, &rsids).await,
+        CompareQuery::Rsids(rsids) => {
+            compare_by_rsids(registry, cache, &args.samples, &rsids).await
+        }
     }
 }
 
 async fn compare_region(
-    cfg: Arc<Config>,
+    registry: Arc<SampleRegistry>,
     samples: &[String],
     chrom: &str,
     start: u32,
@@ -490,7 +493,7 @@ async fn compare_region(
     let mut any_truncated = false;
     for name in samples {
         let resp = query_region(
-            cfg.clone(),
+            registry.clone(),
             QueryRegionArgs {
                 sample: name.clone(),
                 chrom: chrom.to_string(),
@@ -569,7 +572,7 @@ async fn compare_region(
 }
 
 async fn compare_by_rsids(
-    cfg: Arc<Config>,
+    registry: Arc<SampleRegistry>,
     cache: Arc<RsidCache>,
     samples: &[String],
     rsids: &[String],
@@ -579,7 +582,7 @@ async fn compare_by_rsids(
     let mut per_sample: HashMap<String, Vec<LookupRsidEntry>> = HashMap::new();
     for name in samples {
         let resp = lookup_rsids(
-            cfg.clone(),
+            registry.clone(),
             cache.clone(),
             LookupRsidsArgs {
                 sample: name.clone(),
@@ -714,7 +717,7 @@ pub struct LookupRsidsResponse {
 }
 
 pub async fn lookup_rsids(
-    cfg: Arc<Config>,
+    registry: Arc<SampleRegistry>,
     cache: Arc<RsidCache>,
     args: LookupRsidsArgs,
 ) -> Result<LookupRsidsResponse> {
@@ -728,12 +731,9 @@ pub async fn lookup_rsids(
         });
     }
 
-    let sample = cfg
-        .samples
-        .iter()
-        .find(|s| s.name == args.sample)
-        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?
-        .clone();
+    let sample = registry
+        .get(&args.sample)
+        .ok_or_else(|| Error::SampleNotFound(args.sample.clone()))?;
 
     let idx = ensure_rsid_index(&cache, &sample).await?;
 
@@ -904,6 +904,409 @@ fn lookup_rsids_blocking(
         });
     }
     Ok(out)
+}
+
+// ---------- add_sample / add_samples_from_folder / remove_sample ----------
+
+const BGZF_MAGIC: [u8; 4] = [0x1F, 0x8B, 0x08, 0x04];
+const FOLDER_DEFAULT_MAX: usize = 50;
+const FOLDER_HARD_CAP: usize = 200;
+
+#[derive(Debug, Clone)]
+pub struct AddSampleArgs {
+    pub path: String,
+    pub name: Option<String>,
+    pub build: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddSamplesFromFolderArgs {
+    pub folder: String,
+    pub recursive: Option<bool>,
+    pub max_files: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedFile {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FolderScanResponse {
+    pub folder: String,
+    pub scanned: usize,
+    pub registered: Vec<Sample>,
+    pub skipped: Vec<SkippedFile>,
+}
+
+pub async fn add_sample(
+    registry: Arc<SampleRegistry>,
+    allowed_roots: Arc<Vec<std::path::PathBuf>>,
+    args: AddSampleArgs,
+) -> Result<Sample> {
+    tokio::task::spawn_blocking(move || add_sample_blocking(&registry, &allowed_roots, args))
+        .await
+        .map_err(|e| Error::PathInvalid {
+            path: std::path::PathBuf::new(),
+            reason: format!("join: {e}"),
+        })?
+}
+
+pub async fn remove_sample(registry: Arc<SampleRegistry>, name: String) -> Result<Option<Sample>> {
+    tokio::task::spawn_blocking(move || registry.remove(&name))
+        .await
+        .map_err(|e| Error::PathInvalid {
+            path: std::path::PathBuf::new(),
+            reason: format!("join: {e}"),
+        })?
+}
+
+pub async fn add_samples_from_folder(
+    registry: Arc<SampleRegistry>,
+    allowed_roots: Arc<Vec<std::path::PathBuf>>,
+    args: AddSamplesFromFolderArgs,
+) -> Result<FolderScanResponse> {
+    tokio::task::spawn_blocking(move || folder_scan_blocking(&registry, &allowed_roots, args))
+        .await
+        .map_err(|e| Error::PathInvalid {
+            path: std::path::PathBuf::new(),
+            reason: format!("join: {e}"),
+        })?
+}
+
+fn add_sample_blocking(
+    registry: &SampleRegistry,
+    allowed_roots: &[std::path::PathBuf],
+    args: AddSampleArgs,
+) -> Result<Sample> {
+    let raw = std::path::PathBuf::from(&args.path);
+    let canonical = std::fs::canonicalize(&raw).map_err(|e| Error::PathInvalid {
+        path: raw.clone(),
+        reason: e.to_string(),
+    })?;
+
+    // Allowlist check (optional).
+    if !allowed_roots.is_empty() {
+        let canonical_roots: Vec<_> = allowed_roots
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect();
+        if !canonical_roots
+            .iter()
+            .any(|root| canonical.starts_with(root))
+        {
+            return Err(Error::PathNotAllowed {
+                path: canonical,
+                allowed: canonical_roots,
+            });
+        }
+    }
+
+    validate_vcf_path(&canonical)?;
+
+    // Re-use noodles indexed_reader for header inspection and the probe.
+    let mut reader = vcf::io::indexed_reader::Builder::default()
+        .build_from_path(&canonical)
+        .map_err(|source| Error::VcfOpen {
+            path: canonical.clone(),
+            source,
+        })?;
+    let header = reader.read_header().map_err(|e| Error::InvalidVcfFile {
+        path: canonical.clone(),
+        reason: format!("header parse: {e}"),
+    })?;
+
+    if header.contigs().is_empty() {
+        return Err(Error::InvalidVcfFile {
+            path: canonical,
+            reason: "no ##contig lines in header".to_string(),
+        });
+    }
+    if header.sample_names().is_empty() {
+        return Err(Error::InvalidVcfFile {
+            path: canonical,
+            reason: "no sample columns in header (sites-only VCF not supported)".to_string(),
+        });
+    }
+
+    // Functional probe: pick a contig the tabix INDEX actually knows about
+    // (not just one from the VCF ##contig list — a sliced fixture often has
+    // a full set of header contigs but data for only a subset). Query a wide
+    // range; zero records is fine, what matters is that the operation
+    // completes, proving index ↔ data consistency.
+    let probe_contig = reader
+        .index()
+        .header()
+        .and_then(|h| h.reference_sequence_names().iter().next().cloned())
+        .ok_or_else(|| Error::InvalidVcfFile {
+            path: canonical.clone(),
+            reason: "tabix index has no indexed reference sequences".to_string(),
+        })?;
+    // 250M comfortably covers the longest human chromosome (chr1 ≈ 249 Mb).
+    let probe_start = Position::try_from(1usize).unwrap();
+    let probe_end = Position::try_from(250_000_000usize).unwrap();
+    let region = Region::new(probe_contig.clone(), probe_start..=probe_end);
+    let probe = reader
+        .query(&header, &region)
+        .map_err(|e| Error::InvalidVcfFile {
+            path: canonical.clone(),
+            reason: format!("functional probe on {probe_contig}: {e}"),
+        })?;
+    drop(probe);
+
+    // Detect or validate the build.
+    let build = match args.build {
+        Some(b) if b == "GRCh37" || b == "GRCh38" => b,
+        Some(b) => {
+            return Err(Error::InvalidBuild {
+                sample: args
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| derive_name_from_path(&canonical)),
+                build: b,
+            });
+        }
+        None => detect_build(&header).ok_or_else(|| Error::BuildNotDetectable {
+            path: canonical.clone(),
+        })?,
+    };
+
+    // Path-idempotency only when the caller didn't ask for a specific name.
+    // If the user explicitly says "register this file under name X", honor
+    // it even if the same path is already registered under name Y.
+    let provided_name = args.name.filter(|n| !n.is_empty());
+    if provided_name.is_none() {
+        if let Some(existing) = registry.get_by_path(&canonical) {
+            return Ok(existing);
+        }
+    }
+    let name = provided_name.unwrap_or_else(|| derive_name_from_path(&canonical));
+
+    let sample = Sample {
+        name,
+        vcf_path: canonical,
+        build,
+        description: args.description.unwrap_or_default(),
+    };
+
+    registry.add_validated(sample)
+}
+
+fn folder_scan_blocking(
+    registry: &SampleRegistry,
+    allowed_roots: &[std::path::PathBuf],
+    args: AddSamplesFromFolderArgs,
+) -> Result<FolderScanResponse> {
+    let recursive = args.recursive.unwrap_or(false);
+    let max_files = args
+        .max_files
+        .unwrap_or(FOLDER_DEFAULT_MAX)
+        .min(FOLDER_HARD_CAP);
+
+    let folder = std::path::PathBuf::from(&args.folder);
+    let folder_canonical = std::fs::canonicalize(&folder).map_err(|e| Error::PathInvalid {
+        path: folder.clone(),
+        reason: e.to_string(),
+    })?;
+    let meta = std::fs::metadata(&folder_canonical).map_err(|e| Error::PathInvalid {
+        path: folder_canonical.clone(),
+        reason: e.to_string(),
+    })?;
+    if !meta.is_dir() {
+        return Err(Error::PathInvalid {
+            path: folder_canonical,
+            reason: "not a directory".to_string(),
+        });
+    }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    collect_vcf_paths(&folder_canonical, recursive, &mut candidates).map_err(|e| {
+        Error::PathInvalid {
+            path: folder_canonical.clone(),
+            reason: format!("walk: {e}"),
+        }
+    })?;
+    candidates.sort();
+
+    if candidates.len() > max_files {
+        return Err(Error::TooManyFiles {
+            found: candidates.len(),
+            max: max_files,
+            hard_cap: FOLDER_HARD_CAP,
+        });
+    }
+
+    let mut registered = Vec::new();
+    let mut skipped = Vec::new();
+    for path in candidates {
+        let attempt = add_sample_blocking(
+            registry,
+            allowed_roots,
+            AddSampleArgs {
+                path: path.to_string_lossy().into_owned(),
+                name: None,
+                build: None,
+                description: None,
+            },
+        );
+        match attempt {
+            Ok(s) => registered.push(s),
+            Err(e) => skipped.push(SkippedFile {
+                path: path.to_string_lossy().into_owned(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    Ok(FolderScanResponse {
+        folder: folder_canonical.to_string_lossy().into_owned(),
+        scanned: registered.len() + skipped.len(),
+        registered,
+        skipped,
+    })
+}
+
+fn collect_vcf_paths(
+    dir: &std::path::Path,
+    recursive: bool,
+    out: &mut Vec<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_dir() && recursive {
+            collect_vcf_paths(&entry.path(), recursive, out)?;
+        } else if ft.is_file() {
+            let n = entry.file_name();
+            let ns = n.to_string_lossy().to_ascii_lowercase();
+            if ns.ends_with(".vcf.gz") {
+                out.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_vcf_path(canonical: &std::path::Path) -> Result<()> {
+    // Existence + regular file.
+    let meta = std::fs::metadata(canonical).map_err(|e| Error::PathInvalid {
+        path: canonical.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+    if !meta.is_file() {
+        return Err(Error::PathInvalid {
+            path: canonical.to_path_buf(),
+            reason: "not a regular file".to_string(),
+        });
+    }
+
+    // Filename extension.
+    let fname = canonical.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if !fname.to_ascii_lowercase().ends_with(".vcf.gz") {
+        return Err(Error::InvalidVcfFile {
+            path: canonical.to_path_buf(),
+            reason: format!("filename {fname:?} does not end in .vcf.gz"),
+        });
+    }
+
+    // BGZF magic bytes.
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(canonical).map_err(|e| Error::PathInvalid {
+        path: canonical.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+    let mut magic = [0u8; 4];
+    let n = f.read(&mut magic).map_err(|e| Error::InvalidVcfFile {
+        path: canonical.to_path_buf(),
+        reason: format!("read magic bytes: {e}"),
+    })?;
+    if n < 4 || magic != BGZF_MAGIC {
+        return Err(Error::InvalidVcfFile {
+            path: canonical.to_path_buf(),
+            reason: format!(
+                "BGZF magic mismatch (got {:02X} {:02X} {:02X} {:02X}; expected 1F 8B 08 04)",
+                magic[0], magic[1], magic[2], magic[3]
+            ),
+        });
+    }
+
+    // .tbi sibling exists.
+    let mut tbi = canonical.as_os_str().to_owned();
+    tbi.push(".tbi");
+    let tbi_path = std::path::PathBuf::from(tbi);
+    if !tbi_path.exists() {
+        return Err(Error::IndexMissing {
+            sample: fname.to_string(),
+            vcf: canonical.to_path_buf(),
+            expected: tbi_path,
+        });
+    }
+
+    Ok(())
+}
+
+/// Detect genome build from a VCF header. Tries, in order:
+/// 1. `##reference=...` substring match for known build names.
+/// 2. `##contig=<...assembly=...>` field on any contig.
+/// 3. chr1 length heuristic (GRCh38: 248,956,422; GRCh37: 249,250,621).
+fn detect_build(header: &vcf::Header) -> Option<String> {
+    use noodles_vcf::header::record::value::Collection;
+
+    fn classify(s: &str) -> Option<&'static str> {
+        let l = s.to_ascii_lowercase();
+        if l.contains("grch38") || l.contains("hg38") {
+            return Some("GRCh38");
+        }
+        if l.contains("grch37") || l.contains("hg19") {
+            return Some("GRCh37");
+        }
+        None
+    }
+
+    // Method 1: ##reference line (or any other unstructured key carrying a build hint).
+    for (key, records) in header.other_records() {
+        if !key.as_ref().eq_ignore_ascii_case("reference") {
+            continue;
+        }
+        if let Collection::Unstructured(values) = records {
+            for s in values {
+                if let Some(b) = classify(s) {
+                    return Some(b.to_string());
+                }
+            }
+        }
+    }
+
+    // Method 2: contig with assembly field (non-standard tag in other_fields).
+    for (_name, contig) in header.contigs() {
+        for (k, v) in contig.other_fields() {
+            if k.as_ref().eq_ignore_ascii_case("assembly") {
+                if let Some(b) = classify(v) {
+                    return Some(b.to_string());
+                }
+            }
+        }
+    }
+
+    // Method 3: chr1 / 1 length heuristic.
+    for (name, contig) in header.contigs() {
+        let n: &str = name;
+        if n == "chr1" || n == "1" {
+            if let Some(len) = contig.length() {
+                let len = len as i64;
+                if (len - 248_956_422).abs() < 1000 {
+                    return Some("GRCh38".to_string());
+                }
+                if (len - 249_250_621).abs() < 1000 {
+                    return Some("GRCh37".to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

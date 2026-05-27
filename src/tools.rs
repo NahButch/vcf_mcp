@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::{
@@ -10,17 +11,19 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, Sample};
+use crate::config::Sample;
 use crate::error::Error;
+use crate::registry::SampleRegistry;
 use crate::vcf::{
-    self, CompareQuery, CompareSamplesArgs, LookupRsidsArgs, QueryGeneArgs, QueryRegionArgs,
-    RsidCache,
+    self, AddSampleArgs, AddSamplesFromFolderArgs, CompareQuery, CompareSamplesArgs,
+    LookupRsidsArgs, QueryGeneArgs, QueryRegionArgs, RsidCache,
 };
 
 #[derive(Clone)]
 pub struct VcfServer {
-    config: Arc<Config>,
+    registry: Arc<SampleRegistry>,
     rsid_cache: Arc<RsidCache>,
+    allowed_roots: Arc<Vec<PathBuf>>,
     // Populated and read by the #[tool_router] / #[tool_handler] proc-macros.
     #[allow(dead_code)]
     tool_router: ToolRouter<VcfServer>,
@@ -31,6 +34,7 @@ struct SampleSummary<'a> {
     name: &'a str,
     build: &'a str,
     description: &'a str,
+    vcf_path: String,
 }
 
 impl<'a> From<&'a Sample> for SampleSummary<'a> {
@@ -39,30 +43,96 @@ impl<'a> From<&'a Sample> for SampleSummary<'a> {
             name: &s.name,
             build: &s.build,
             description: &s.description,
+            vcf_path: s.vcf_path.to_string_lossy().into_owned(),
         }
     }
 }
 
 #[tool_router]
 impl VcfServer {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(registry: Arc<SampleRegistry>, allowed_roots: Vec<PathBuf>) -> Self {
         Self {
-            config,
+            registry,
             rsid_cache: Arc::new(RsidCache::default()),
+            allowed_roots: Arc::new(allowed_roots),
             tool_router: Self::tool_router(),
         }
     }
 
-    #[tool(description = "List the VCF samples configured on this server.")]
+    #[tool(
+        description = "List the VCF samples currently registered on this server. Returns name, genome build, description, and absolute vcf_path for each. Returns an empty list if no samples are registered yet — use add_sample to register one."
+    )]
     async fn list_samples(&self) -> Result<CallToolResult, McpError> {
-        let summaries: Vec<SampleSummary<'_>> = self
-            .config
-            .samples
-            .iter()
-            .map(SampleSummary::from)
-            .collect();
+        let samples = self.registry.list();
+        let summaries: Vec<SampleSummary<'_>> = samples.iter().map(SampleSummary::from).collect();
         let payload = serde_json::to_string(&summaries)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
+        description = "Register a single bgzipped, tabix-indexed VCF file as a queryable sample. Pass an absolute file path (must end in .vcf.gz and have a matching .tbi alongside). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a tabix probe before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended."
+    )]
+    async fn add_sample(
+        &self,
+        Parameters(args): Parameters<AddSampleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let sample = vcf::add_sample(
+            self.registry.clone(),
+            self.allowed_roots.clone(),
+            AddSampleArgs {
+                path: args.path,
+                name: args.name,
+                build: args.build,
+                description: args.description,
+            },
+        )
+        .await
+        .map_err(map_domain_error)?;
+        let summary = SampleSummary::from(&sample);
+        let payload = serde_json::to_string(&summary)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
+        description = "Scan a folder for .vcf.gz files and register each that passes validation. Set recursive=true to walk subdirectories. Default max_files is 50; server hard cap is 200. If the folder contains more VCFs than max_files, the call errors with a hint telling the caller exactly which value to re-call with. Per-file validation failures don't abort the scan — they collect in a `skipped` array with the reason per file. Use this when the user pastes a folder path instead of file paths."
+    )]
+    async fn add_samples_from_folder(
+        &self,
+        Parameters(args): Parameters<AddSamplesFromFolderParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = vcf::add_samples_from_folder(
+            self.registry.clone(),
+            self.allowed_roots.clone(),
+            AddSamplesFromFolderArgs {
+                folder: args.folder,
+                recursive: args.recursive,
+                max_files: args.max_files,
+            },
+        )
+        .await
+        .map_err(map_domain_error)?;
+        let payload = serde_json::to_string(&resp)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
+        description = "Unregister a sample by name. Does not delete the underlying VCF file. Returns the removed sample's details if it existed."
+    )]
+    async fn remove_sample(
+        &self,
+        Parameters(args): Parameters<RemoveSampleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let removed = vcf::remove_sample(self.registry.clone(), args.name.clone())
+            .await
+            .map_err(map_domain_error)?;
+        let payload = match removed {
+            Some(s) => serde_json::to_string(&SampleSummary::from(&s)),
+            None => Ok(format!("{{\"removed\":false,\"name\":{:?}}}", args.name)),
+        }
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(payload)]))
     }
 
@@ -74,7 +144,7 @@ impl VcfServer {
         Parameters(args): Parameters<QueryRegionParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = vcf::query_region(
-            self.config.clone(),
+            self.registry.clone(),
             QueryRegionArgs {
                 sample: args.sample,
                 chrom: args.chrom,
@@ -97,7 +167,7 @@ impl VcfServer {
         Parameters(args): Parameters<QueryGeneParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = vcf::query_gene(
-            self.config.clone(),
+            self.registry.clone(),
             QueryGeneArgs {
                 sample: args.sample,
                 gene: args.gene,
@@ -125,7 +195,7 @@ impl VcfServer {
             }
         };
         let result = vcf::compare_samples(
-            self.config.clone(),
+            self.registry.clone(),
             self.rsid_cache.clone(),
             CompareSamplesArgs {
                 samples: args.samples,
@@ -147,7 +217,7 @@ impl VcfServer {
         Parameters(args): Parameters<LookupRsidsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = vcf::lookup_rsids(
-            self.config.clone(),
+            self.registry.clone(),
             self.rsid_cache.clone(),
             LookupRsidsArgs {
                 sample: args.sample,
@@ -164,7 +234,7 @@ impl VcfServer {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct QueryRegionParams {
-    /// Sample name as configured on the server.
+    /// Sample name as registered on the server.
     pub sample: String,
     /// Chromosome, with or without 'chr' prefix (e.g. "17" or "chr17").
     pub chrom: String,
@@ -176,7 +246,7 @@ pub struct QueryRegionParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LookupRsidsParams {
-    /// Sample name as configured on the server.
+    /// Sample name as registered on the server.
     pub sample: String,
     /// dbSNP rsids to look up (e.g. ["rs429358", "rs7412"]). Max 100 per call.
     pub rsids: Vec<String>,
@@ -184,7 +254,7 @@ pub struct LookupRsidsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct QueryGeneParams {
-    /// Sample name as configured on the server.
+    /// Sample name as registered on the server.
     pub sample: String,
     /// HGNC gene symbol, case-insensitive (e.g. "COL1A1").
     pub gene: String,
@@ -207,6 +277,35 @@ pub enum CompareQueryParams {
     Region { chrom: String, start: u32, end: u32 },
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddSampleParams {
+    /// Absolute path to a bgzipped, tabix-indexed VCF file.
+    pub path: String,
+    /// Optional name; auto-derived from filename if omitted.
+    pub name: Option<String>,
+    /// Optional explicit genome build ("GRCh37" or "GRCh38"); auto-detected
+    /// from the VCF header if omitted.
+    pub build: Option<String>,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddSamplesFromFolderParams {
+    /// Absolute path to a folder containing .vcf.gz files.
+    pub folder: String,
+    /// Walk subdirectories? Default false.
+    pub recursive: Option<bool>,
+    /// Maximum number of files to register in this call. Default 50, hard cap 200.
+    pub max_files: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RemoveSampleParams {
+    /// Registered sample name to remove.
+    pub name: String,
+}
+
 fn map_domain_error(e: Error) -> McpError {
     match e {
         Error::SampleNotFound(_)
@@ -216,7 +315,14 @@ fn map_domain_error(e: Error) -> McpError {
         | Error::EmptyRsidList
         | Error::TooManyRsids { .. }
         | Error::GeneNotFound(_)
-        | Error::TooFewSamples { .. } => McpError::invalid_params(e.to_string(), None),
+        | Error::TooFewSamples { .. }
+        | Error::PathInvalid { .. }
+        | Error::PathNotAllowed { .. }
+        | Error::InvalidVcfFile { .. }
+        | Error::BuildNotDetectable { .. }
+        | Error::TooManyFiles { .. }
+        | Error::IndexMissing { .. }
+        | Error::InvalidBuild { .. } => McpError::invalid_params(e.to_string(), None),
         _ => McpError::internal_error(e.to_string(), None),
     }
 }
@@ -228,7 +334,7 @@ impl ServerHandler for VcfServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "VCF query MCP server. Use list_samples to discover available samples.",
+                "VCF query MCP server. To get started, call `add_sample` with a full file path, or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, or compare_samples. Use remove_sample to unregister.",
             )
     }
 }

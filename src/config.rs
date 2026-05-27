@@ -88,6 +88,7 @@ fn tabix_path_for(vcf: &Path) -> PathBuf {
     PathBuf::from(tbi)
 }
 
+#[allow(dead_code)] // retained for back-compat; users may still pass --config <path>
 pub fn default_config_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "vcf-mcp").map(|p| p.config_dir().join("config.toml"))
 }

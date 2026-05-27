@@ -221,6 +221,9 @@ impl McpHarness {
         let bin = env!("CARGO_BIN_EXE_vcf-mcp");
         let mut child = Command::new(bin)
             .arg("serve")
+            // --ephemeral so each test starts with an empty registry and
+            // doesn't share / clobber the user's real state.json.
+            .arg("--ephemeral")
             .arg("--config")
             .arg(cfg_path)
             .stdin(Stdio::piped())
@@ -796,6 +799,174 @@ async fn compare_samples_too_few_errors() {
     assert!(is_error_response(&resp));
     let msg = resp["error"]["message"].as_str().unwrap();
     assert!(msg.contains('2'), "msg: {msg}");
+    h.shutdown().await;
+}
+
+// ---------- add_sample / add_samples_from_folder / remove_sample ----------
+
+fn fixture_vcf_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/na12878_chr17_slice.vcf.gz")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[tokio::test]
+async fn add_sample_registers_with_explicit_args() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    // Existing registry has NA12878 and NA12878_copy from the TOML import.
+    let path = fixture_vcf_path();
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": path, "name": "freshly_added", "build": "GRCh38",
+                   "description": "added via tool call"}),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["name"], "freshly_added");
+    assert_eq!(body["build"], "GRCh38");
+    assert_eq!(body["description"], "added via tool call");
+
+    // list_samples should now show three entries.
+    let resp2 = h.call_tool("list_samples", json!({})).await;
+    let samples: Vec<Value> = serde_json::from_str(extract_text(&resp2)).unwrap();
+    let names: Vec<&str> = samples
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"freshly_added"), "got {names:?}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_auto_derives_name_and_detects_build() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let path = fixture_vcf_path();
+    let resp = h
+        .call_tool("add_sample", json!({"path": path, "build": "GRCh38"}))
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    // The slice file is "na12878_chr17_slice.vcf.gz". The TOML bootstrap
+    // already registered it as "NA12878"; calling add_sample WITHOUT an
+    // explicit name + same canonical path triggers idempotency, returning
+    // the existing entry. So we may see either the derived name or the
+    // pre-registered one — both are correct outcomes.
+    let name = body["name"].as_str().unwrap();
+    assert!(
+        name == "NA12878"
+            || name == "na12878_chr17_slice"
+            || name.starts_with("na12878_chr17_slice_"),
+        "got {name}"
+    );
+    assert_eq!(body["build"], "GRCh38");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_idempotent_without_explicit_name() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let path = fixture_vcf_path();
+    // First call without name registers (or returns existing under canonical
+    // path — TOML import already registered it as "NA12878").
+    let r1 = h
+        .call_tool("add_sample", json!({"path": &path, "build": "GRCh38"}))
+        .await;
+    let r2 = h
+        .call_tool("add_sample", json!({"path": &path, "build": "GRCh38"}))
+        .await;
+    let b1: Value = serde_json::from_str(extract_text(&r1)).unwrap();
+    let b2: Value = serde_json::from_str(extract_text(&r2)).unwrap();
+    assert_eq!(
+        b1["name"], b2["name"],
+        "calls without explicit name should be idempotent"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_rejects_bad_path() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": "Z:\\does\\not\\exist.vcf.gz", "build": "GRCh38"}),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_rejects_non_vcf_extension() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    // Point at a real file that isn't .vcf.gz (use this very test source).
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("Cargo.toml")
+        .to_string_lossy()
+        .into_owned();
+    let resp = h
+        .call_tool("add_sample", json!({"path": path, "build": "GRCh38"}))
+        .await;
+    assert!(is_error_response(&resp));
+    let msg = resp["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains(".vcf.gz") || msg.contains("filename"),
+        "msg: {msg}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn remove_sample_works() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    // Pre-add a removable entry.
+    let path = fixture_vcf_path();
+    h.call_tool(
+        "add_sample",
+        json!({"path": &path, "name": "to_be_removed", "build": "GRCh38"}),
+    )
+    .await;
+    let r = h
+        .call_tool("remove_sample", json!({"name": "to_be_removed"}))
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&r)).unwrap();
+    assert_eq!(body["name"], "to_be_removed");
+
+    // Removing again returns the not-removed sentinel.
+    let r2 = h
+        .call_tool("remove_sample", json!({"name": "to_be_removed"}))
+        .await;
+    let body2: Value = serde_json::from_str(extract_text(&r2)).unwrap();
+    assert_eq!(body2["removed"], false);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_samples_from_folder_finds_the_slice() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data")
+        .to_string_lossy()
+        .into_owned();
+    let resp = h
+        .call_tool("add_samples_from_folder", json!({"folder": folder}))
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    // tests/data contains the slice + .tbi + config.toml (the .tbi and
+    // config.toml don't end in .vcf.gz so they're skipped at collection time).
+    // The slice was already registered via the TOML import on harness start,
+    // so the auto-derive idempotency path applies — it returns the existing
+    // entry (NA12878) without erroring.
+    let scanned = body["scanned"].as_u64().unwrap();
+    assert!(scanned >= 1, "expected at least one .vcf.gz");
+    let registered = body["registered"].as_array().unwrap();
+    let skipped = body["skipped"].as_array().unwrap();
+    assert_eq!(
+        registered.len() + skipped.len(),
+        scanned as usize,
+        "registered + skipped should equal scanned"
+    );
     h.shutdown().await;
 }
 

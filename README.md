@@ -18,28 +18,36 @@ for the full warranty disclaimer.
 
 ## What it does
 
-Exposes five tools to an MCP client:
+Exposes eight tools to an MCP client:
 
 | Tool | Description |
 |---|---|
-| `list_samples` | List configured VCF samples (name, build, description). |
+| `add_sample` | Register a single VCF file at runtime. Validates BGZF magic, header structure, and runs a tabix probe before accepting. Auto-detects genome build from the VCF header; auto-derives sample name from the filename. |
+| `add_samples_from_folder` | Scan a folder for `*.vcf.gz` and register each that passes validation. Optional recursive walk. Default cap 50 files, hard cap 200. |
+| `remove_sample` | Unregister a sample by name (doesn't delete the file). |
+| `list_samples` | List currently registered samples. |
 | `query_region` | Return variant calls overlapping a chromosomal region. |
 | `lookup_rsids` | Look up variants by dbSNP rsid; lazy per-sample cache. |
 | `query_gene` | Return variants in a gene's coordinates using the embedded Ensembl 115/87 gene table. |
 | `compare_samples` | Run the same query across multiple samples and merge per-sample results. |
 
 The tools return structured JSON. An MCP client like Claude Desktop calls them
-on demand as the model reasons about your prompts.
+on demand as the model reasons about your prompts. **Zero-config startup is
+supported** — point Claude Desktop at the binary, then in a chat paste a VCF
+path (or a folder of VCFs) and ask Claude to register them. The server
+auto-detects genome build and persists registrations to a state file so they
+survive restarts.
 
 ## Quick start
 
 ```bash
 git clone <repo> vcf-mcp && cd vcf-mcp
 cargo build --release
-# Generate a tabix index if your VCF doesn't have one:
+# (Optional) generate a tabix index if your VCF doesn't have one:
 cargo run --release --example index_vcf -- /path/to/your.vcf.gz
-# Edit config.example.toml to point at your VCF, save as config.toml,
-# then wire the binary into your MCP client (see "Claude Desktop" below).
+# Wire the binary into your MCP client (see "Claude Desktop" below).
+# No config file needed — just chat with Claude and paste your VCF path
+# when prompted; the server registers it via add_sample.
 ```
 
 ## Prerequisites
@@ -68,17 +76,28 @@ The binary lands at `target/release/vcf-mcp` (or `.exe` on Windows).
 > (`unset CARGO_TARGET_DIR` / `$env:CARGO_TARGET_DIR=''`) or pass
 > `--target-dir target` on the command line.
 
-## Configure
+## Configure (optional)
 
-vcf-mcp reads a TOML config file. Default path:
+There are three ways to register samples; pick whichever fits your workflow:
 
-| OS | Path |
+**1. In chat (recommended)** — say "add this VCF: D:\path\file.vcf.gz" and
+Claude calls `add_sample` for you. The server validates the file and remembers
+it. Registrations persist across server restarts via a small auto-managed
+state file:
+
+| OS | Default state file |
 |---|---|
-| Linux | `~/.config/vcf-mcp/config.toml` |
-| macOS | `~/Library/Application Support/vcf-mcp/config.toml` |
-| Windows | `%APPDATA%\vcf-mcp\config.toml` |
+| Linux | `~/.local/share/vcf-mcp/state.json` |
+| macOS | `~/Library/Application Support/vcf-mcp/state.json` |
+| Windows | `%LOCALAPPDATA%\vcf-mcp\data\state.json` |
 
-Or pass `--config <path>` on the command line. Example (also see
+You never edit this file directly; the server writes it. Override the location
+with `--state-file <path>` or disable persistence entirely with `--ephemeral`.
+
+**2. TOML bootstrap** — for an existing setup, or to seed several samples at
+once. Pass `--config /path/to/config.toml`; the file is imported into the
+registry on startup. After import, normal `add_sample` / `remove_sample`
+operations still work and persist to the state file. Example (also see
 [`config.example.toml`](config.example.toml)):
 
 ```toml
@@ -87,20 +106,20 @@ name = "me"                                    # short identifier you'll use in 
 vcf_path = "patient_001.snp-indel.vcf.gz"      # absolute, or relative to this config file
 build = "GRCh38"                               # or "GRCh37"
 description = "Whole-genome sequencing, 2025-06-24"
-
-[[samples]]
-name = "spouse"
-vcf_path = "spouse_001.vcf.gz"
-build = "GRCh38"
-description = "..."
 ```
 
-Each `vcf_path` must point at a bgzipped VCF with a matching `.tbi` alongside.
+**3. Folder scan** — say "register everything in D:\cohort\" and Claude calls
+`add_samples_from_folder`. Default cap 50 files, hard cap 200; see the tool
+reference below.
 
-To validate config without starting the server:
+Whichever path you choose, each VCF must be bgzipped with a `.tbi` alongside
+(the server has a built-in indexer if you don't have one — see "Building a
+`.tbi` index" below).
+
+To validate startup without serving:
 
 ```bash
-vcf-mcp serve --config /path/to/config.toml --check
+vcf-mcp serve --check
 ```
 
 ### Building a `.tbi` index
@@ -130,11 +149,16 @@ don't replace the whole file):
   "mcpServers": {
     "vcf-mcp": {
       "command": "/absolute/path/to/vcf-mcp",
-      "args": ["serve", "--config", "/absolute/path/to/config.toml"]
+      "args": ["serve"]
     }
   }
 }
 ```
+
+The minimal `serve` form uses state-file persistence — registrations made via
+chat survive restarts. To bootstrap from a TOML config, add
+`"--config", "/path/to/config.toml"` to the args. To run entirely without
+persistence (each session blank), add `"--ephemeral"`.
 
 On Windows, escape backslashes (`"D:\\code\\vcf-mcp\\target\\release\\vcf-mcp.exe"`)
 or use forward slashes.
@@ -171,14 +195,77 @@ JSON in the `text` field of an MCP `CallToolResult`. Coordinate conventions are
 **1-based inclusive** throughout, matching the VCF spec and command-line tools
 like `tabix`.
 
+### `add_sample`
+
+| Arg | Type | Required | Notes |
+|---|---|---|---|
+| `path` | string | ✓ | Absolute path to a bgzipped, tabix-indexed VCF |
+| `name` | string | | Auto-derived from filename if omitted |
+| `build` | string | | "GRCh37" or "GRCh38"; auto-detected from VCF header if omitted |
+| `description` | string | | Human-readable note |
+
+Validation chain (short-circuits on the first failure, cheapest first):
+
+1. Path canonicalizes (resolves symlinks)
+2. Path exists, is a regular file, readable
+3. Filename ends `.vcf.gz` (case-insensitive)
+4. First 4 bytes match BGZF magic `1F 8B 08 04` (rejects plain gzip)
+5. `.tbi` sibling exists
+6. `noodles_vcf::io::indexed_reader::Builder` opens the file
+7. Header has `#CHROM` line, ≥1 sample column, ≥1 `##contig`
+8. Tabix probe on the first indexed contig proves data ↔ index consistency
+
+Build detection cascade: `##reference=` substring → `##contig=<...assembly=...>`
+field → chr1 length heuristic (GRCh38: 248,956,422; GRCh37: 249,250,621).
+
+Re-adding the same canonical path **without** an explicit name returns the
+existing entry (idempotent). Re-adding **with** an explicit name registers a
+new entry — useful for viewing the same file under multiple labels.
+
+### `add_samples_from_folder`
+
+| Arg | Type | Required | Notes |
+|---|---|---|---|
+| `folder` | string | ✓ | Absolute path to a directory |
+| `recursive` | bool | | Walk subdirectories. Default false |
+| `max_files` | integer | | Max files to register; default 50, hard cap 200 |
+
+If the folder contains more `.vcf.gz` files than `max_files`, the call errors
+with a hint telling the caller exactly which `max_files` value would let the
+scan proceed. Per-file validation failures **don't** abort the scan — they
+collect in a `skipped` array with the per-file reason:
+
+```json
+{
+  "folder": "D:\\cohort",
+  "scanned": 12,
+  "registered": [
+    {"name": "patient_001", "build": "GRCh38", "description": "", "vcf_path": "..."}
+  ],
+  "skipped": [
+    {"path": "D:\\cohort\\malformed.vcf.gz", "reason": "BGZF magic mismatch ..."}
+  ]
+}
+```
+
+### `remove_sample`
+
+| Arg | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | ✓ | Registered sample name |
+
+Drops the sample from the registry (and from the state file). Returns the
+removed sample's summary, or `{"removed": false, "name": "..."}` if no such
+sample was registered.
+
 ### `list_samples`
 
 No arguments.
 
 ```json
 [
-  {"name": "me", "build": "GRCh38", "description": "..."},
-  {"name": "spouse", "build": "GRCh38", "description": "..."}
+  {"name": "me", "build": "GRCh38", "description": "...", "vcf_path": "..."},
+  {"name": "spouse", "build": "GRCh38", "description": "...", "vcf_path": "..."}
 ]
 ```
 

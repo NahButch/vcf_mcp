@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod genes;
+mod registry;
 mod tools;
 mod vcf;
 
@@ -13,7 +14,8 @@ use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Config, default_config_path};
+use crate::config::Config;
+use crate::registry::{SampleRegistry, default_state_path};
 use crate::tools::VcfServer;
 
 #[derive(Parser)]
@@ -27,13 +29,30 @@ struct Cli {
 enum Command {
     /// Start the MCP server, speaking JSON-RPC over stdio.
     Serve {
-        /// Path to the config file. Defaults to the OS-standard config location.
+        /// Optional TOML config to bootstrap registered samples on startup.
+        /// Without this, samples come from the state file (or empty if
+        /// `--ephemeral`).
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Validate config and exit without starting the server.
+        /// Validate config / startup and exit without serving.
         #[arg(long)]
         check: bool,
+
+        /// Disable disk-backed state persistence. Each server start is blank;
+        /// the LLM has to add_sample on every fresh session.
+        #[arg(long)]
+        ephemeral: bool,
+
+        /// Path to the state file. Defaults to the OS-standard data location.
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+
+        /// Restrict add_sample paths to directories under one of these roots.
+        /// Repeatable. Default: no restriction (Claude reads anywhere the
+        /// user account can).
+        #[arg(long = "allowed-root")]
+        allowed_roots: Vec<PathBuf>,
     },
 }
 
@@ -53,7 +72,6 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");
-            // Print full error chain to stderr for the operator.
             let mut source = std::error::Error::source(&*e);
             while let Some(s) = source {
                 tracing::error!("caused by: {s}");
@@ -66,35 +84,70 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Serve { config, check } => {
-            let path = match config {
-                Some(p) => p,
-                None => default_config_path().ok_or_else(|| {
-                    "could not resolve a default config path on this platform; pass --config"
-                        .to_string()
-                })?,
+        Command::Serve {
+            config,
+            check,
+            ephemeral,
+            state_file,
+            allowed_roots,
+        } => {
+            // Resolve state file path: explicit > default. Disabled if --ephemeral.
+            let state_path = if ephemeral {
+                None
+            } else {
+                state_file.or_else(default_state_path)
             };
-            tracing::info!(config = %path.display(), "loading config");
-            let cfg = Config::load(&path)?;
-            cfg.validate()?;
-            tracing::info!(samples = cfg.samples.len(), "config validated");
+            if let Some(ref p) = state_path {
+                tracing::info!(state = %p.display(), "using state file");
+            } else {
+                tracing::info!("ephemeral mode: no state file");
+            }
+
+            let registry = Arc::new(SampleRegistry::new(state_path));
+            // Load from disk (no-op if missing). Errors here are fatal because
+            // they indicate corrupt state.
+            registry.load_from_disk()?;
+            tracing::info!(samples = registry.len(), "state loaded");
+
+            // Optional bootstrap from a TOML config (import existing samples
+            // into the registry on first run).
+            if let Some(toml_path) = &config {
+                tracing::info!(config = %toml_path.display(), "importing samples from TOML");
+                let cfg = Config::load(toml_path)?;
+                cfg.validate()?;
+                let added = registry.import(cfg.samples)?;
+                tracing::info!(imported = added, "TOML bootstrap complete");
+            }
+
+            if !allowed_roots.is_empty() {
+                tracing::info!(
+                    roots = ?allowed_roots,
+                    "restricting add_sample to listed roots"
+                );
+            }
 
             if check {
-                tracing::info!("--check requested; exiting before server startup");
+                tracing::info!(
+                    samples = registry.len(),
+                    "--check requested; exiting before server startup"
+                );
                 return Ok(());
             }
 
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(serve_stdio(Arc::new(cfg)))?;
+            rt.block_on(serve_stdio(registry, allowed_roots))?;
             Ok(())
         }
     }
 }
 
-async fn serve_stdio(cfg: Arc<Config>) -> Result<(), Box<dyn std::error::Error>> {
-    let server = VcfServer::new(cfg);
+async fn serve_stdio(
+    registry: Arc<SampleRegistry>,
+    allowed_roots: Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let server = VcfServer::new(registry, allowed_roots);
     tracing::info!("starting MCP server on stdio");
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

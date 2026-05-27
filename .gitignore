@@ -1,5 +1,6 @@
-# Rust build output
-/target/
+# Rust build output (anywhere a cargo invocation might land it)
+target/
+target-*/
 **/*.rs.bk
 Cargo.lock.bak
 
