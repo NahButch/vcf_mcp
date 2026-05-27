@@ -976,6 +976,28 @@ pub struct ResetSamplesResponse {
     pub removed: Vec<Sample>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ServerInfoResponse {
+    pub name: &'static str,
+    pub version: &'static str,
+    pub ensembl_release_grch38: u32,
+    pub ensembl_release_grch37: u32,
+    pub registered_samples: usize,
+}
+
+/// Snapshot of the running server's identity and state, exposed as a tool so
+/// the LLM can answer "what version are you?" / "which gene table?" / "how
+/// many samples do you have registered?" without guessing.
+pub fn server_info(registry: &SampleRegistry) -> ServerInfoResponse {
+    ServerInfoResponse {
+        name: env!("CARGO_PKG_NAME"),
+        version: env!("CARGO_PKG_VERSION"),
+        ensembl_release_grch38: crate::genes::ENSEMBL_RELEASE_GRCH38,
+        ensembl_release_grch37: crate::genes::ENSEMBL_RELEASE_GRCH37,
+        registered_samples: registry.len(),
+    }
+}
+
 /// Wipe the registry: drop all samples, clear caches, and rewrite the state
 /// file as empty. Useful for workflow / cowork steps ("clean slate before
 /// re-registering"). Destructive — caller must pass `confirm=true` upstream;

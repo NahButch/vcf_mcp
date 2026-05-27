@@ -321,6 +321,20 @@ fn is_error_response(resp: &Value) -> bool {
 // ---------- tests ----------
 
 #[tokio::test]
+async fn server_info_reports_version_and_state() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h.call_tool("server_info", json!({})).await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["name"], env!("CARGO_PKG_NAME"));
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["ensembl_release_grch38"], 115);
+    assert_eq!(body["ensembl_release_grch37"], 87);
+    // Harness boots with 2 samples from the TOML import fixture.
+    assert_eq!(body["registered_samples"], 2);
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_samples_returns_configured_samples() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     let resp = h.call_tool("list_samples", json!({})).await;

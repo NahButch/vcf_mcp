@@ -60,6 +60,16 @@ impl VcfServer {
     }
 
     #[tool(
+        description = "Return the running server's identity: vcf-mcp version, embedded Ensembl gene-table release per build, and the current count of registered samples. Use this when the user asks what version they're talking to or what reference data is in play."
+    )]
+    async fn server_info(&self) -> Result<CallToolResult, McpError> {
+        let info = vcf::server_info(&self.registry);
+        let payload = serde_json::to_string(&info)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(payload)]))
+    }
+
+    #[tool(
         description = "List the VCF samples currently registered on this server. Returns name, genome build, description, and absolute vcf_path for each. Returns an empty list if no samples are registered yet — use add_sample to register one."
     )]
     async fn list_samples(&self) -> Result<CallToolResult, McpError> {
