@@ -33,3 +33,7 @@ cobertura.xml
 # Env files
 .env
 .env.local
+
+# Temporary commit-message scratch files (used by the PowerShell heredoc
+# workaround when piping multi-line messages to `git commit -F`).
+.commit-msg.tmp
