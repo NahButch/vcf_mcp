@@ -1177,15 +1177,65 @@ pub struct FolderScanResponse {
 
 pub async fn add_sample(
     registry: Arc<SampleRegistry>,
+    rsid_cache: Arc<RsidCache>,
     allowed_roots: Arc<Vec<std::path::PathBuf>>,
     args: AddSampleArgs,
 ) -> Result<AddSampleResponse> {
-    tokio::task::spawn_blocking(move || add_sample_blocking(&registry, &allowed_roots, args))
-        .await
-        .map_err(|e| Error::PathInvalid {
-            path: std::path::PathBuf::new(),
-            reason: format!("join: {e}"),
-        })?
+    let registry_for_blocking = registry.clone();
+    let resp = tokio::task::spawn_blocking(move || {
+        add_sample_blocking(&registry_for_blocking, &allowed_roots, args)
+    })
+    .await
+    .map_err(|e| Error::PathInvalid {
+        path: std::path::PathBuf::new(),
+        reason: format!("join: {e}"),
+    })??;
+
+    // Registration builds and caches the tabix index synchronously, but not
+    // the rsID cache. Warm it in the background for the primary and any
+    // siblings so the first lookup_rsids against a freshly added sample
+    // doesn't pay the stream-the-whole-file cost. Fire-and-forget.
+    let mut names = Vec::with_capacity(1 + resp.adjacent.len());
+    names.push(resp.primary.name.clone());
+    names.extend(resp.adjacent.iter().map(|a| a.name.clone()));
+    warm_rsids_in_background(registry, rsid_cache, names);
+
+    Ok(resp)
+}
+
+/// Fire-and-forget background warm of the rsID cache for freshly registered
+/// samples. The tabix index is built and cached synchronously during
+/// registration; the rsID cache is not. This closes that gap so the first
+/// `lookup_rsids` on a new sample is fast. Skips samples already cached;
+/// failures are logged, never propagated; the task dies with the process.
+fn warm_rsids_in_background(
+    registry: Arc<SampleRegistry>,
+    rsid_cache: Arc<RsidCache>,
+    names: Vec<String>,
+) {
+    if names.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        for name in names {
+            let Some(sample) = registry.get(&name) else {
+                continue;
+            };
+            if rsid_cache.get(&sample.name).is_some() {
+                continue;
+            }
+            if let Err(e) = ensure_rsid_index(&rsid_cache, &sample).await {
+                tracing::warn!(
+                    perf = true,
+                    phase = "rsid_warm",
+                    event = "failed",
+                    sample = %name,
+                    error = %e,
+                    "background rsid warm failed (first lookup_rsids will retry)"
+                );
+            }
+        }
+    });
 }
 
 pub async fn remove_sample(registry: Arc<SampleRegistry>, name: String) -> Result<Option<Sample>> {

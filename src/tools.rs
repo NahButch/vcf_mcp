@@ -104,6 +104,7 @@ impl VcfServer {
         let _t = PerfTimer::start("tool:add_sample");
         let result = vcf::add_sample(
             self.registry.clone(),
+            self.rsid_cache.clone(),
             self.allowed_roots.clone(),
             AddSampleArgs {
                 path: args.path,

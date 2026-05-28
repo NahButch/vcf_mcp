@@ -228,11 +228,12 @@ Validation chain (short-circuits on the first failure, cheapest first):
 The in-memory tabix index is cached on the server (per sample) for the
 lifetime of the process, so subsequent queries don't rebuild. Indexes are
 NOT persisted across restarts — they're rebuilt on first use against each
-sample. To keep that cost off the first user-facing query, the server warms
-every registered sample's index in the background at startup. On a large
-whole-genome file the cold build can still dominate the first query if it
-races ahead of warmup; see [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the details
-and the timeout interaction.
+sample, which is fast (~3.5 s for a 30× WGS file; rsID caches build in a
+similar few seconds). To keep even that small cost off the first user-facing
+query, the server warms every registered sample's caches in the background at
+startup, and warms the rsID cache for newly added samples in the background
+after `add_sample`. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for measured timings
+and the OneDrive-hydration caveat.
 
 Build detection cascade: `##reference=` substring → `##contig=<...assembly=...>`
 field → chr1 length heuristic (GRCh38: 248,956,422; GRCh37: 249,250,621).
