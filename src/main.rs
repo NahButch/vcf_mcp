@@ -33,6 +33,54 @@ const FULL_VERSION: &str = concat!(
 // to spot when scanning interleaved stderr logs.
 const BANNER_RULE: &str = "--------------------------------------------------";
 
+/// Emit a one-time startup header to stderr: the build version and the samples
+/// currently registered. Mirrors the `vcf-genetic-panel` splash (file-icon
+/// logo + sample list). Built as a single multi-line string and logged in one
+/// call so the box art isn't broken up by a per-line timestamp/level prefix.
+fn emit_startup_header(registry: &SampleRegistry) {
+    const RULE: &str = "────────────────────────────────────────────────────────────";
+    let samples = registry.list();
+
+    let mut h = String::from("\n");
+    h.push_str(RULE);
+    h.push('\n');
+    h.push_str("  ┌─────────┐\n");
+    h.push_str("  │  ≡   ▌▐ │   VCF genetic\n");
+    h.push_str(&format!("  │  ≡   ▌▐ │   v{FULL_VERSION}\n"));
+    h.push_str("  │  ≡   ▌▐ │   MCP server · genomic VCF query · stdio\n");
+    h.push_str("  └─────────┘\n");
+
+    if samples.is_empty() {
+        h.push_str(
+            "  Available VCF Data Files — none yet (use add_sample with a file or folder)\n",
+        );
+    } else {
+        let plural = if samples.len() == 1 { "" } else { "s" };
+        h.push_str(&format!(
+            "  Available VCF Data Files — {} sample{}\n",
+            samples.len(),
+            plural
+        ));
+        let width = samples
+            .iter()
+            .map(|s| s.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        for s in &samples {
+            // Canonicalized Windows paths carry a `\\?\` extended-length prefix
+            // that's noise in a header — show the clean path.
+            let path = s.vcf_path.display().to_string();
+            let path = path.strip_prefix(r"\\?\").unwrap_or(&path);
+            h.push_str(&format!(
+                "    • {:<width$}  [{}]  {path}\n",
+                s.name, s.build
+            ));
+        }
+    }
+    h.push_str(RULE);
+    tracing::info!("{h}");
+}
+
 #[derive(Parser)]
 #[command(name = "vcf-mcp", version = FULL_VERSION, about = "MCP server for querying VCF files")]
 struct Cli {
@@ -81,11 +129,10 @@ fn main() -> ExitCode {
         .with_ansi(false)
         .init();
 
-    // Loud, easy-to-spot boot banner so a fresh process is obvious in the
-    // interleaved stderr logs (Claude Desktop respawns this binary often).
-    tracing::info!("{BANNER_RULE}");
-    tracing::info!("vcf-mcp booting  version={FULL_VERSION}");
-    tracing::info!("{BANNER_RULE}");
+    // Earliest possible identity line — emitted before anything can fail, so a
+    // fresh process is always identifiable even if startup aborts. The full
+    // header (with samples) is emitted once the registry is loaded.
+    tracing::info!("vcf-mcp v{FULL_VERSION} starting");
 
     let cli = Cli::parse();
 
@@ -146,6 +193,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "restricting add_sample to listed roots"
                 );
             }
+
+            // Full startup header — version + the samples that are now loaded.
+            emit_startup_header(&registry);
 
             if check {
                 tracing::info!(
