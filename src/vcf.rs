@@ -811,6 +811,12 @@ pub async fn lookup_rsids(
             max: MAX_RSIDS_PER_LOOKUP,
         });
     }
+    // A blank entry can never match a real rsid; surface it as a 400-style
+    // input error rather than silently returning found:false, which looks
+    // like "this rsid isn't in the sample" and hides the caller's mistake.
+    if let Some(index) = args.rsids.iter().position(|r| r.trim().is_empty()) {
+        return Err(Error::BlankRsid { index });
+    }
 
     let sample = registry
         .get(&args.sample)

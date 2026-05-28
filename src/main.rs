@@ -29,6 +29,10 @@ const FULL_VERSION: &str = concat!(
     env!("VCF_MCP_COMMIT"),
 );
 
+// Horizontal rule for boot / ready banners — makes process (re)starts trivial
+// to spot when scanning interleaved stderr logs.
+const BANNER_RULE: &str = "--------------------------------------------------";
+
 #[derive(Parser)]
 #[command(name = "vcf-mcp", version = FULL_VERSION, about = "MCP server for querying VCF files")]
 struct Cli {
@@ -76,6 +80,12 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
+
+    // Loud, easy-to-spot boot banner so a fresh process is obvious in the
+    // interleaved stderr logs (Claude Desktop respawns this binary often).
+    tracing::info!("{BANNER_RULE}");
+    tracing::info!("vcf-mcp booting  version={FULL_VERSION}");
+    tracing::info!("{BANNER_RULE}");
 
     let cli = Cli::parse();
 
@@ -169,9 +179,13 @@ async fn serve_stdio(
     vcf::warmup_samples_in_background(registry.clone(), rsid_cache.clone());
 
     let server = VcfServer::new(registry, rsid_cache, allowed_roots);
-    tracing::info!("starting MCP server on stdio");
+    tracing::info!("{BANNER_RULE}");
+    tracing::info!("vcf-mcp READY — serving MCP over stdio  version={FULL_VERSION}");
+    tracing::info!("{BANNER_RULE}");
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
-    tracing::info!("MCP server stopped");
+    tracing::info!("{BANNER_RULE}");
+    tracing::info!("vcf-mcp STOPPED");
+    tracing::info!("{BANNER_RULE}");
     Ok(())
 }

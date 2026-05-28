@@ -74,6 +74,9 @@ pub enum Error {
     #[error("rsids list is empty")]
     EmptyRsidList,
 
+    #[error("rsids[{index}] is blank; every entry must be a non-empty rsid")]
+    BlankRsid { index: usize },
+
     #[error("{0}")]
     GeneNotFound(String),
 
@@ -172,6 +175,7 @@ impl Error {
             | Error::PositionOutOfBounds { .. }
             | Error::RegionTooLarge { .. }
             | Error::EmptyRsidList
+            | Error::BlankRsid { .. }
             | Error::TooManyRsids { .. }
             | Error::GeneNotFound(_)
             | Error::TooFewSamples { .. }
@@ -232,6 +236,9 @@ impl Error {
                 Some("Maximum region length is 10 Mb. Narrow the query or split it into chunks.")
             }
             Error::EmptyRsidList => Some("Pass at least one rsid in the `rsids` array."),
+            Error::BlankRsid { .. } => Some(
+                "Remove blank/empty strings from the `rsids` array; each entry should be an rsid like \"rs7412\".",
+            ),
             Error::TooManyRsids { .. } => {
                 Some("Split the rsids across multiple lookup_rsids calls (100 per call).")
             }
@@ -299,6 +306,7 @@ impl Error {
             Error::QueryTimeout { .. } => "QueryTimeout",
             Error::TooManyRsids { .. } => "TooManyRsids",
             Error::EmptyRsidList => "EmptyRsidList",
+            Error::BlankRsid { .. } => "BlankRsid",
             Error::GeneNotFound(_) => "GeneNotFound",
             Error::TooFewSamples { .. } => "TooFewSamples",
             Error::PathInvalid { .. } => "PathInvalid",

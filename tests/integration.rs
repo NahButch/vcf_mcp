@@ -734,6 +734,24 @@ async fn lookup_rsids_empty_list_errors() {
 }
 
 #[tokio::test]
+async fn lookup_rsids_blank_entry_errors() {
+    // A blank rsid is a caller mistake, not a "not found" result — it should
+    // surface as an input error rather than a found:false entry.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "lookup_rsids",
+            json!({"sample": "NA12878", "rsids": ["rs7412", "  "]}),
+        )
+        .await;
+    assert!(is_error_response(&resp));
+    let payload = extract_error_payload(&resp);
+    let msg = payload["message"].as_str().unwrap();
+    assert!(msg.contains("blank"), "msg: {msg}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn lookup_rsids_too_many_errors() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     let rsids: Vec<String> = (1..=101).map(|i| format!("rs{i}")).collect();
