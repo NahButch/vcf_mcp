@@ -1175,12 +1175,52 @@ pub struct FolderScanResponse {
     pub skipped: Vec<SkippedFile>,
 }
 
+/// `add_sample` accepts either a file or a directory. Untagged so the JSON is
+/// just the inner response shape — a single-file add returns the
+/// `AddSampleResponse` shape, a folder add returns the `FolderScanResponse`
+/// shape, with no enum wrapper for the client to unwrap.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum AddSampleResult {
+    Single(Box<AddSampleResponse>),
+    Folder(Box<FolderScanResponse>),
+}
+
 pub async fn add_sample(
     registry: Arc<SampleRegistry>,
     rsid_cache: Arc<RsidCache>,
     allowed_roots: Arc<Vec<std::path::PathBuf>>,
     args: AddSampleArgs,
-) -> Result<AddSampleResponse> {
+) -> Result<AddSampleResult> {
+    // If the caller hands us a directory, treat add_sample as a folder scan
+    // (non-recursive, default file caps) so "add this path" works whether the
+    // path points at a file or a folder of VCFs. A missing path falls through
+    // to the single-file flow, which produces the precise PathInvalid error.
+    let is_dir = std::fs::metadata(&args.path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+
+    if is_dir {
+        let folder_args = AddSamplesFromFolderArgs {
+            folder: args.path.clone(),
+            recursive: None,
+            max_files: None,
+        };
+        let registry_for_blocking = registry.clone();
+        let resp = tokio::task::spawn_blocking(move || {
+            folder_scan_blocking(&registry_for_blocking, &allowed_roots, folder_args)
+        })
+        .await
+        .map_err(|e| Error::PathInvalid {
+            path: std::path::PathBuf::new(),
+            reason: format!("join: {e}"),
+        })??;
+
+        let names: Vec<String> = resp.registered.iter().map(|r| r.name.clone()).collect();
+        warm_rsids_in_background(registry, rsid_cache, names);
+        return Ok(AddSampleResult::Folder(Box::new(resp)));
+    }
+
     let registry_for_blocking = registry.clone();
     let resp = tokio::task::spawn_blocking(move || {
         add_sample_blocking(&registry_for_blocking, &allowed_roots, args)
@@ -1200,7 +1240,7 @@ pub async fn add_sample(
     names.extend(resp.adjacent.iter().map(|a| a.name.clone()));
     warm_rsids_in_background(registry, rsid_cache, names);
 
-    Ok(resp)
+    Ok(AddSampleResult::Single(Box::new(resp)))
 }
 
 /// Fire-and-forget background warm of the rsID cache for freshly registered

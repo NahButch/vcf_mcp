@@ -1421,6 +1421,27 @@ async fn add_samples_from_folder_finds_the_slice() {
 }
 
 #[tokio::test]
+async fn add_sample_with_directory_runs_folder_scan() {
+    // Handing add_sample a directory should behave like add_samples_from_folder:
+    // it returns the folder-scan shape (folder/scanned/registered/skipped),
+    // not the single-file shape.
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data")
+        .to_string_lossy()
+        .into_owned();
+    let resp = h.call_tool("add_sample", json!({"path": folder})).await;
+    assert!(!is_error_response(&resp));
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert!(
+        body.get("scanned").is_some() && body.get("registered").is_some(),
+        "expected folder-scan shape, got: {body}"
+    );
+    assert!(body.get("folder").is_some(), "expected folder field");
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn compare_samples_unknown_sample_errors() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     let resp = h
