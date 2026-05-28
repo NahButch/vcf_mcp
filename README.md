@@ -1,8 +1,9 @@
 # vcf-mcp
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that lets an
-AI assistant query bgzipped, tabix-indexed VCF files — your personal genome, a
-cohort sample, anything in VCF format — through natural-language prompts.
+AI assistant query bgzipped VCF files — your personal genome, a cohort sample,
+anything in VCF format — through natural-language prompts. No `.tbi` index file
+required; the server builds one in memory at registration time.
 Built in Rust on top of [`noodles`](https://crates.io/crates/noodles) for VCF
 I/O and [`rmcp`](https://crates.io/crates/rmcp) for the MCP protocol.
 
@@ -18,14 +19,16 @@ for the full warranty disclaimer.
 
 ## What it does
 
-Exposes eight tools to an MCP client:
+Exposes ten tools to an MCP client:
 
 | Tool | Description |
 |---|---|
-| `add_sample` | Register a single VCF file at runtime. Validates BGZF magic, header structure, and runs a tabix probe before accepting. Auto-detects genome build from the VCF header; auto-derives sample name from the filename. |
+| `add_sample` | Register a single VCF file at runtime. Validates BGZF magic, header structure, and runs a tabix probe before accepting. Auto-detects genome build from the VCF header; auto-derives sample name from the filename. By default also scans the directory for variant-class siblings (see below). |
 | `add_samples_from_folder` | Scan a folder for `*.vcf.gz` and register each that passes validation. Optional recursive walk. Default cap 50 files, hard cap 200. |
 | `remove_sample` | Unregister a sample by name (doesn't delete the file). |
+| `reset_samples` | Drop every registered sample and its caches; rewrites the state file empty. Destructive — requires `confirm: true`. |
 | `list_samples` | List currently registered samples. |
+| `server_info` | Report vcf-mcp version, embedded Ensembl release per build, and registered-sample count. |
 | `query_region` | Return variant calls overlapping a chromosomal region. |
 | `lookup_rsids` | Look up variants by dbSNP rsid; lazy per-sample cache. |
 | `query_gene` | Return variants in a gene's coordinates using the embedded Ensembl 115/87 gene table. |
@@ -205,10 +208,11 @@ like `tabix`.
 
 | Arg | Type | Required | Notes |
 |---|---|---|---|
-| `path` | string | ✓ | Absolute path to a bgzipped, tabix-indexed VCF |
+| `path` | string | ✓ | Absolute path to a bgzipped VCF (`.vcf.gz`) |
 | `name` | string | | Auto-derived from filename if omitted |
 | `build` | string | | "GRCh37" or "GRCh38"; auto-detected from VCF header if omitted |
 | `description` | string | | Human-readable note |
+| `scan_adjacent` | bool | | Scan the directory for variant-class siblings. Default `true` |
 
 Validation chain (short-circuits on the first failure, cheapest first):
 
@@ -223,8 +227,12 @@ Validation chain (short-circuits on the first failure, cheapest first):
 
 The in-memory tabix index is cached on the server (per sample) for the
 lifetime of the process, so subsequent queries don't rebuild. Indexes are
-NOT persisted across restarts — they're rebuilt on first query against
-each sample, which is fast (~3–4 s for a 30× WGS file).
+NOT persisted across restarts — they're rebuilt on first use against each
+sample. To keep that cost off the first user-facing query, the server warms
+every registered sample's index in the background at startup. On a large
+whole-genome file the cold build can still dominate the first query if it
+races ahead of warmup; see [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the details
+and the timeout interaction.
 
 Build detection cascade: `##reference=` substring → `##contig=<...assembly=...>`
 field → chr1 length heuristic (GRCh38: 248,956,422; GRCh37: 249,250,621).
@@ -232,6 +240,41 @@ field → chr1 length heuristic (GRCh38: 248,956,422; GRCh37: 249,250,621).
 Re-adding the same canonical path **without** an explicit name returns the
 existing entry (idempotent). Re-adding **with** an explicit name registers a
 new entry — useful for viewing the same file under multiple labels.
+
+**Adjacent-file auto-detection** (`scan_adjacent`, default `true`): variant
+callers often emit one cohort as several files sharing a stem and differing
+only by a variant-class token — e.g. `person.snp-indel.genome.vcf.gz`,
+`person.cnv.vcf.gz`, `person.sv.vcf.gz`, `person.mitochondrial.vcf.gz`. After
+the primary file registers, vcf-mcp strips the recognized class token to find
+the stem and looks in the **same directory** for siblings in the other classes.
+Each sibling goes through the full validation chain above and registers as a
+separate sample named `{primary_name}-{class}` (`-cnv`, `-sv`, `-mt`). The scan
+is non-fatal: a sibling that fails validation never blocks the primary.
+
+Recognized class tokens (case-insensitive, stripped before `.vcf.gz`):
+`.snp-indel.genome`, `.snp-indel`, `.snv`, `.small-variants` (treated as the
+primary class, no suffix), `.cnv` → `-cnv`, `.sv` / `.structural` → `-sv`,
+`.mitochondrial` / `.mt` → `-mt`. If the primary's name ends in none of these
+tokens, no scan runs. The scan is idempotent — already-registered siblings are
+not duplicated. Pass `scan_adjacent: false` to register only the single file.
+
+The response extends the primary's summary with two arrays — `adjacent` (the
+siblings that registered) and `adjacent_skipped` (siblings found but rejected,
+each with a `reason`). Both are empty when nothing applies:
+
+```json
+{
+  "name": "person", "build": "GRCh38", "description": "", "vcf_path": "...person.snp-indel.genome.vcf.gz",
+  "variant_class": "small-variants",
+  "adjacent": [
+    {"name": "person-cnv", "build": "GRCh38", "variant_class": "cnv", "vcf_path": "...person.cnv.vcf.gz"},
+    {"name": "person-sv",  "build": "GRCh38", "variant_class": "sv",  "vcf_path": "...person.sv.vcf.gz"}
+  ],
+  "adjacent_skipped": [
+    {"path": "...person.mitochondrial.vcf.gz", "reason": "BGZF magic mismatch ..."}
+  ]
+}
+```
 
 ### `add_samples_from_folder`
 
@@ -327,7 +370,11 @@ Maximum 10 Mb region. Result is capped at 500 records; when truncated, the
 | Arg | Type | Required | Notes |
 |---|---|---|---|
 | `sample` | string | ✓ | |
-| `rsids` | array of string | ✓ | 1–100 entries |
+| `rsids` | array of string | ✓ | 1–100 entries; blank/whitespace entries are rejected |
+
+A blank or whitespace-only rsid is treated as a caller mistake and returns an
+input error (rather than silently yielding `found: false`, which would look
+like a real not-in-sample result).
 
 First call against a sample triggers a one-time scan of the VCF to build an
 in-memory `rsid → position` cache (a few seconds on a 30× WGS file).
