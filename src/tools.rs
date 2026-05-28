@@ -82,7 +82,7 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Register a single bgzipped VCF file as a queryable sample. Pass an absolute file path ending in .vcf.gz. No tabix .tbi file is required — the server builds the index in memory (and uses an existing .tbi as a fast-load shortcut only if one happens to be present). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a probe query before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended."
+        description = "Register a bgzipped VCF file as a queryable sample. Pass an absolute file path ending in .vcf.gz. No tabix .tbi file is required — the server builds the index in memory (and uses an existing .tbi as a fast-load shortcut only if one happens to be present). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a probe query before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. By default (scan_adjacent=true), after the primary registers the server also scans the same directory for sibling VCFs sharing the primary's stem but differing by a variant-class token — e.g. a .snp-indel.genome.vcf.gz primary will pull in .cnv.vcf.gz, .sv.vcf.gz, .mitochondrial.vcf.gz siblings, registered as {name}-cnv, {name}-sv, {name}-mt. The response lists registered siblings in `adjacent` and any that failed validation in `adjacent_skipped`. Set scan_adjacent=false to register only the single named file. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended."
     )]
     async fn add_sample(
         &self,
@@ -97,11 +97,12 @@ impl VcfServer {
                 name: args.name,
                 build: args.build,
                 description: args.description,
+                scan_adjacent: args.scan_adjacent,
             },
         )
         .await;
         match result {
-            Ok(s) => tool_ok(&SampleSummary::from(&s)),
+            Ok(resp) => tool_ok(&resp),
             Err(e) => Ok(domain_error_to_result(e)),
         }
     }
@@ -296,7 +297,7 @@ pub enum CompareQueryParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddSampleParams {
-    /// Absolute path to a bgzipped, tabix-indexed VCF file.
+    /// Absolute path to a bgzipped VCF file (.vcf.gz). No .tbi required.
     pub path: String,
     /// Optional name; auto-derived from filename if omitted.
     pub name: Option<String>,
@@ -305,6 +306,11 @@ pub struct AddSampleParams {
     pub build: Option<String>,
     /// Optional human-readable description.
     pub description: Option<String>,
+    /// When true (default), after the primary registers, scan its directory
+    /// for sibling VCFs that share its stem and differ only by a variant-class
+    /// token (cnv / sv / mt) and register each as {name}-{class}. Set false to
+    /// register only the single file you named.
+    pub scan_adjacent: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

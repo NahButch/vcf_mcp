@@ -1064,12 +1064,88 @@ const BGZF_MAGIC: [u8; 4] = [0x1F, 0x8B, 0x08, 0x04];
 const FOLDER_DEFAULT_MAX: usize = 50;
 const FOLDER_HARD_CAP: usize = 200;
 
+/// All recognized variant-class tokens (the infix before `.vcf.gz`) mapped to
+/// a short class name. MUST be ordered longest-token-first so suffix matching
+/// picks `.snp-indel.genome` over `.snp-indel`, `.structural` over `.sv`, etc.
+/// The "small" class is the typical primary (small-variant) file; it's never
+/// registered as a sibling.
+const VARIANT_CLASS_TOKENS: &[(&str, &str)] = &[
+    (".snp-indel.genome", "small"),
+    (".small-variants", "small"),
+    (".mitochondrial", "mt"),
+    (".structural", "sv"),
+    (".snp-indel", "small"),
+    (".cnv", "cnv"),
+    (".snv", "small"),
+    (".sv", "sv"),
+    (".mt", "mt"),
+];
+
+/// Classes we register as siblings, with the tokens to probe for each. The
+/// "small" class is intentionally excluded — it's the primary, not a sibling.
+const SIBLING_CLASSES: &[(&str, &[&str])] = &[
+    ("cnv", &[".cnv"]),
+    ("sv", &[".sv", ".structural"]),
+    ("mt", &[".mitochondrial", ".mt"]),
+];
+
 #[derive(Debug, Clone)]
 pub struct AddSampleArgs {
     pub path: String,
     pub name: Option<String>,
     pub build: Option<String>,
     pub description: Option<String>,
+    /// When true (default), after the primary registers, scan its directory
+    /// for sibling VCFs (cnv / sv / mt) sharing the primary's stem and
+    /// register each. False preserves strict single-file behavior.
+    pub scan_adjacent: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisteredSample {
+    pub name: String,
+    pub vcf_path: String,
+    pub build: String,
+    pub description: String,
+}
+
+impl From<Sample> for RegisteredSample {
+    fn from(s: Sample) -> Self {
+        RegisteredSample {
+            name: s.name,
+            vcf_path: s.vcf_path.to_string_lossy().into_owned(),
+            build: s.build,
+            description: s.description,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdjacentRegistered {
+    pub name: String,
+    pub vcf_path: String,
+    pub build: String,
+    pub variant_class: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdjacentSkipped {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddSampleResponse {
+    #[serde(flatten)]
+    pub primary: RegisteredSample,
+    /// The primary's detected variant class ("small" / "cnv" / "sv" / "mt"),
+    /// or null if its filename carried no recognized class token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant_class: Option<String>,
+    /// Sibling VCFs registered alongside the primary.
+    pub adjacent: Vec<AdjacentRegistered>,
+    /// Sibling files that were found next to the primary but failed validation.
+    pub adjacent_skipped: Vec<AdjacentSkipped>,
 }
 
 #[derive(Debug, Clone)]
@@ -1089,7 +1165,7 @@ pub struct SkippedFile {
 pub struct FolderScanResponse {
     pub folder: String,
     pub scanned: usize,
-    pub registered: Vec<Sample>,
+    pub registered: Vec<RegisteredSample>,
     pub skipped: Vec<SkippedFile>,
 }
 
@@ -1097,7 +1173,7 @@ pub async fn add_sample(
     registry: Arc<SampleRegistry>,
     allowed_roots: Arc<Vec<std::path::PathBuf>>,
     args: AddSampleArgs,
-) -> Result<Sample> {
+) -> Result<AddSampleResponse> {
     tokio::task::spawn_blocking(move || add_sample_blocking(&registry, &allowed_roots, args))
         .await
         .map_err(|e| Error::PathInvalid {
@@ -1332,14 +1408,81 @@ fn add_sample_blocking(
     registry: &SampleRegistry,
     allowed_roots: &[std::path::PathBuf],
     args: AddSampleArgs,
-) -> Result<Sample> {
+) -> Result<AddSampleResponse> {
     let raw = std::path::PathBuf::from(&args.path);
     let canonical = std::fs::canonicalize(&raw).map_err(|e| Error::PathInvalid {
         path: raw.clone(),
         reason: e.to_string(),
     })?;
 
-    // Allowlist check (optional).
+    let provided_name = args.name.clone().filter(|n| !n.is_empty());
+    let name_hint = provided_name
+        .clone()
+        .unwrap_or_else(|| derive_name_from_path(&canonical));
+
+    let (index, build) =
+        validate_and_acquire(&canonical, allowed_roots, &name_hint, args.build.clone())?;
+
+    let variant_class = detect_stem_and_class(&canonical).map(|(_, class)| class.to_string());
+
+    // Path-idempotency only when the caller didn't ask for a specific name.
+    // On a re-add of the same path we return the existing entry and DON'T
+    // re-scan siblings (they were registered on the first call and persist),
+    // so a second add_sample never double-registers.
+    if provided_name.is_none() {
+        if let Some(existing) = registry.get_by_path(&canonical) {
+            return Ok(AddSampleResponse {
+                primary: existing.into(),
+                variant_class,
+                adjacent: Vec::new(),
+                adjacent_skipped: Vec::new(),
+            });
+        }
+    }
+    let name = provided_name.unwrap_or_else(|| derive_name_from_path(&canonical));
+
+    let primary = registry.add_validated(Sample {
+        name,
+        vcf_path: canonical.clone(),
+        build: build.clone(),
+        description: args.description.unwrap_or_default(),
+    })?;
+    registry.set_tabix_index(primary.name.clone(), Arc::new(index));
+
+    // Sibling scan (cnv / sv / mt) sharing the primary's stem.
+    let mut adjacent = Vec::new();
+    let mut adjacent_skipped = Vec::new();
+    if args.scan_adjacent.unwrap_or(true) {
+        scan_siblings(
+            registry,
+            allowed_roots,
+            &canonical,
+            &primary.name,
+            &build,
+            &mut adjacent,
+            &mut adjacent_skipped,
+        );
+    }
+
+    Ok(AddSampleResponse {
+        primary: primary.into(),
+        variant_class,
+        adjacent,
+        adjacent_skipped,
+    })
+}
+
+/// Run the full validation chain on a candidate VCF and return its in-memory
+/// tabix index plus its resolved genome build. Shared by the primary and
+/// sibling registration paths: allowlist check → BGZF/extension/.tbi-optional
+/// validation → index acquire → header structure → functional probe → build
+/// detection (or honoring an explicit `build_override`).
+fn validate_and_acquire(
+    canonical: &std::path::Path,
+    allowed_roots: &[std::path::PathBuf],
+    name_hint: &str,
+    build_override: Option<String>,
+) -> Result<(noodles_tabix::Index, String)> {
     if !allowed_roots.is_empty() {
         let canonical_roots: Vec<_> = allowed_roots
             .iter()
@@ -1350,109 +1493,174 @@ fn add_sample_blocking(
             .any(|root| canonical.starts_with(root))
         {
             return Err(Error::PathNotAllowed {
-                path: canonical,
+                path: canonical.to_path_buf(),
                 allowed: canonical_roots,
             });
         }
     }
 
-    validate_vcf_path(&canonical)?;
+    validate_vcf_path(canonical)?;
 
-    // Acquire the tabix index (load .tbi if present, otherwise build in
-    // memory — never write). The Arc-wrapped index gets cached on the
-    // registry after we successfully complete validation.
-    let index = acquire_tabix_index(&canonical)?;
+    let index = acquire_tabix_index(canonical)?;
 
-    let file = std::fs::File::open(&canonical).map_err(|source| Error::VcfOpen {
-        path: canonical.clone(),
+    let file = std::fs::File::open(canonical).map_err(|source| Error::VcfOpen {
+        path: canonical.to_path_buf(),
         source,
     })?;
-    // Clone the freshly-built index for the reader; we still hold the
-    // original to cache against the eventual sample name once we know it.
     let mut reader = vcf::io::IndexedReader::new(file, index.clone());
     let header = reader.read_header().map_err(|e| Error::InvalidVcfFile {
-        path: canonical.clone(),
+        path: canonical.to_path_buf(),
         reason: format!("header parse: {e}"),
     })?;
 
     if header.contigs().is_empty() {
         return Err(Error::InvalidVcfFile {
-            path: canonical,
+            path: canonical.to_path_buf(),
             reason: "no ##contig lines in header".to_string(),
         });
     }
     if header.sample_names().is_empty() {
         return Err(Error::InvalidVcfFile {
-            path: canonical,
+            path: canonical.to_path_buf(),
             reason: "no sample columns in header (sites-only VCF not supported)".to_string(),
         });
     }
 
     // Functional probe: pick a contig the tabix INDEX actually knows about
-    // (not just one from the VCF ##contig list — a sliced fixture often has
-    // a full set of header contigs but data for only a subset). Query a wide
-    // range; zero records is fine, what matters is that the operation
-    // completes, proving index ↔ data consistency.
+    // (not just one from the VCF ##contig list). Zero records is fine; what
+    // matters is that the query completes, proving index ↔ data consistency.
     let probe_contig = reader
         .index()
         .header()
         .and_then(|h| h.reference_sequence_names().iter().next().cloned())
         .ok_or_else(|| Error::InvalidVcfFile {
-            path: canonical.clone(),
+            path: canonical.to_path_buf(),
             reason: "tabix index has no indexed reference sequences".to_string(),
         })?;
-    // 250M comfortably covers the longest human chromosome (chr1 ≈ 249 Mb).
     let probe_start = Position::try_from(1usize).unwrap();
     let probe_end = Position::try_from(250_000_000usize).unwrap();
     let region = Region::new(probe_contig.clone(), probe_start..=probe_end);
     let probe = reader
         .query(&header, &region)
         .map_err(|e| Error::InvalidVcfFile {
-            path: canonical.clone(),
+            path: canonical.to_path_buf(),
             reason: format!("functional probe on {probe_contig}: {e}"),
         })?;
     drop(probe);
 
-    // Detect or validate the build.
-    let build = match args.build {
+    let build = match build_override {
         Some(b) if b == "GRCh37" || b == "GRCh38" => b,
         Some(b) => {
             return Err(Error::InvalidBuild {
-                sample: args
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| derive_name_from_path(&canonical)),
+                sample: name_hint.to_string(),
                 build: b,
             });
         }
         None => detect_build(&header).ok_or_else(|| Error::BuildNotDetectable {
-            path: canonical.clone(),
+            path: canonical.to_path_buf(),
         })?,
     };
 
-    // Path-idempotency only when the caller didn't ask for a specific name.
-    // If the user explicitly says "register this file under name X", honor
-    // it even if the same path is already registered under name Y.
-    let provided_name = args.name.filter(|n| !n.is_empty());
-    if provided_name.is_none() {
-        if let Some(existing) = registry.get_by_path(&canonical) {
-            return Ok(existing);
+    Ok((index, build))
+}
+
+/// Strip `.vcf.gz` and a trailing variant-class token from a path's filename.
+/// Returns (stem, class_short) where class_short is "small"/"cnv"/"sv"/"mt".
+/// Returns None when no known class token is a suffix — in that case we can't
+/// tell siblings from unrelated files, so no scan should run.
+fn detect_stem_and_class(path: &std::path::Path) -> Option<(String, &'static str)> {
+    let filename = path.file_name()?.to_str()?;
+    let lower = filename.to_ascii_lowercase();
+    if !lower.ends_with(".vcf.gz") {
+        return None;
+    }
+    let core_len = filename.len() - ".vcf.gz".len();
+    let core = &filename[..core_len];
+    let core_lower = &lower[..core_len];
+    for (token, class) in VARIANT_CLASS_TOKENS {
+        if core_lower.ends_with(token) {
+            let stem = &core[..core.len() - token.len()];
+            return Some((stem.to_string(), class));
         }
     }
-    let name = provided_name.unwrap_or_else(|| derive_name_from_path(&canonical));
+    None
+}
 
-    let sample = Sample {
-        name,
-        vcf_path: canonical,
-        build,
-        description: args.description.unwrap_or_default(),
+/// Scan the primary's parent directory for sibling VCFs (cnv / sv / mt) that
+/// share the primary's stem, registering each found one as
+/// `{primary_name}-{class}`. Sibling failures are non-fatal — collected into
+/// `adjacent_skipped`. Already-registered siblings (idempotent re-add) are
+/// reported in `adjacent` using their existing entry, never duplicated.
+fn scan_siblings(
+    registry: &SampleRegistry,
+    allowed_roots: &[std::path::PathBuf],
+    primary_canonical: &std::path::Path,
+    primary_name: &str,
+    build: &str,
+    adjacent: &mut Vec<AdjacentRegistered>,
+    adjacent_skipped: &mut Vec<AdjacentSkipped>,
+) {
+    let Some((stem, primary_class)) = detect_stem_and_class(primary_canonical) else {
+        return; // no recognized class token → can't identify siblings
+    };
+    let Some(parent) = primary_canonical.parent() else {
+        return;
     };
 
-    let registered = registry.add_validated(sample)?;
-    // Cache the index we just loaded/built so the first query against this
-    // sample doesn't re-acquire it.
-    registry.set_tabix_index(registered.name.clone(), Arc::new(index));
-    Ok(registered)
+    for (class_short, tokens) in SIBLING_CLASSES {
+        if *class_short == primary_class {
+            continue; // the primary already covers this class
+        }
+        for token in *tokens {
+            let candidate = parent.join(format!("{stem}{token}.vcf.gz"));
+            if !candidate.exists() {
+                continue;
+            }
+            let sib_name = format!("{primary_name}-{class_short}");
+            match register_sibling(registry, allowed_roots, &candidate, &sib_name, build) {
+                Ok(reg) => adjacent.push(AdjacentRegistered {
+                    name: reg.name,
+                    vcf_path: reg.vcf_path.to_string_lossy().into_owned(),
+                    build: reg.build,
+                    variant_class: (*class_short).to_string(),
+                }),
+                Err(e) => adjacent_skipped.push(AdjacentSkipped {
+                    path: candidate.to_string_lossy().into_owned(),
+                    reason: e.to_string(),
+                }),
+            }
+            break; // one file per class
+        }
+    }
+}
+
+/// Register a single sibling VCF. Idempotent on canonical path: if the file is
+/// already registered (e.g. a prior add_sample run) the existing entry is
+/// returned without re-registering. Siblings inherit the primary's build.
+fn register_sibling(
+    registry: &SampleRegistry,
+    allowed_roots: &[std::path::PathBuf],
+    candidate: &std::path::Path,
+    sib_name: &str,
+    build: &str,
+) -> Result<Sample> {
+    let canonical = std::fs::canonicalize(candidate).map_err(|e| Error::PathInvalid {
+        path: candidate.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+    if let Some(existing) = registry.get_by_path(&canonical) {
+        return Ok(existing);
+    }
+    let (index, resolved_build) =
+        validate_and_acquire(&canonical, allowed_roots, sib_name, Some(build.to_string()))?;
+    let reg = registry.add_validated(Sample {
+        name: sib_name.to_string(),
+        vcf_path: canonical,
+        build: resolved_build,
+        description: String::new(),
+    })?;
+    registry.set_tabix_index(reg.name.clone(), Arc::new(index));
+    Ok(reg)
 }
 
 fn folder_scan_blocking(
@@ -1502,6 +1710,9 @@ fn folder_scan_blocking(
     let mut registered = Vec::new();
     let mut skipped = Vec::new();
     for path in candidates {
+        // scan_adjacent=false: the folder walk already enumerates every
+        // .vcf.gz here, so per-file sibling detection would only double-work
+        // and risk naming confusion. Each file registers on its own merits.
         let attempt = add_sample_blocking(
             registry,
             allowed_roots,
@@ -1510,10 +1721,11 @@ fn folder_scan_blocking(
                 name: None,
                 build: None,
                 description: None,
+                scan_adjacent: Some(false),
             },
         );
         match attempt {
-            Ok(s) => registered.push(s),
+            Ok(resp) => registered.push(resp.primary),
             Err(e) => skipped.push(SkippedFile {
                 path: path.to_string_lossy().into_owned(),
                 reason: e.to_string(),

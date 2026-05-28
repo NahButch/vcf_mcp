@@ -1124,6 +1124,182 @@ async fn add_sample_builds_index_in_memory_when_tbi_missing() {
     h.shutdown().await;
 }
 
+// Copy the committed slice (a valid bgzipped VCF) to `dir/name` — used to
+// fabricate sibling files whose *names* carry variant-class tokens. Detection
+// is filename-based, so the content being the same slice is fine.
+fn copy_slice_as(dir: &Path, name: &str) {
+    let src =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/na12878_chr17_slice.vcf.gz");
+    std::fs::copy(&src, dir.join(name)).unwrap();
+}
+
+#[tokio::test]
+async fn add_sample_registers_adjacent_siblings() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_slice_as(tmp.path(), "trio.snp-indel.genome.vcf.gz");
+    copy_slice_as(tmp.path(), "trio.cnv.vcf.gz");
+    copy_slice_as(tmp.path(), "trio.sv.vcf.gz");
+    let primary = tmp
+        .path()
+        .join("trio.snp-indel.genome.vcf.gz")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": primary, "name": "trio", "build": "GRCh38"}),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["name"], "trio");
+    assert_eq!(body["variant_class"], "small");
+    let adj = body["adjacent"].as_array().unwrap();
+    let names: Vec<&str> = adj.iter().map(|a| a["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"trio-cnv"), "got {names:?}");
+    assert!(names.contains(&"trio-sv"), "got {names:?}");
+    assert_eq!(adj.len(), 2);
+    assert!(body["adjacent_skipped"].as_array().unwrap().is_empty());
+    // Each sibling inherits the primary's build and is independently queryable.
+    for a in adj {
+        assert_eq!(a["build"], "GRCh38");
+    }
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_no_class_token_skips_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_slice_as(tmp.path(), "plain.vcf.gz");
+    // A .cnv sibling exists but the primary has no recognized class token, so
+    // we can't tell siblings from unrelated files — no scan should run.
+    copy_slice_as(tmp.path(), "plain.cnv.vcf.gz");
+    let primary = tmp
+        .path()
+        .join("plain.vcf.gz")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": primary, "name": "plainx", "build": "GRCh38"}),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["name"], "plainx");
+    // No variant_class field (filename had no recognized token).
+    assert!(body.get("variant_class").is_none() || body["variant_class"].is_null());
+    assert!(body["adjacent"].as_array().unwrap().is_empty());
+    assert!(body["adjacent_skipped"].as_array().unwrap().is_empty());
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_corrupt_sibling_goes_to_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_slice_as(tmp.path(), "c.snp-indel.vcf.gz");
+    // A sibling that exists but isn't BGZF — should fail validation and land
+    // in adjacent_skipped without failing the primary.
+    std::fs::write(tmp.path().join("c.cnv.vcf.gz"), b"not a bgzf file at all").unwrap();
+    let primary = tmp
+        .path()
+        .join("c.snp-indel.vcf.gz")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": primary, "name": "corrupt_test", "build": "GRCh38"}),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    // Primary still succeeded.
+    assert_eq!(body["name"], "corrupt_test");
+    assert!(body["adjacent"].as_array().unwrap().is_empty());
+    let skipped = body["adjacent_skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    let reason = skipped[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("BGZF") || reason.contains("bgzipped"),
+        "reason should explain the format problem: {reason}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_scan_adjacent_false_skips_siblings() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_slice_as(tmp.path(), "strict.snp-indel.genome.vcf.gz");
+    copy_slice_as(tmp.path(), "strict.cnv.vcf.gz");
+    let primary = tmp
+        .path()
+        .join("strict.snp-indel.genome.vcf.gz")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool(
+            "add_sample",
+            json!({"path": primary, "name": "strict", "build": "GRCh38",
+                   "scan_adjacent": false}),
+        )
+        .await;
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    assert_eq!(body["name"], "strict");
+    assert!(
+        body["adjacent"].as_array().unwrap().is_empty(),
+        "scan_adjacent=false should register no siblings"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn add_sample_adjacent_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_slice_as(tmp.path(), "idem.snp-indel.genome.vcf.gz");
+    copy_slice_as(tmp.path(), "idem.cnv.vcf.gz");
+    let primary = tmp
+        .path()
+        .join("idem.snp-indel.genome.vcf.gz")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    // Two adds of the same primary WITHOUT an explicit name (so the path-
+    // idempotency short-circuit applies on the second call).
+    let r1 = h
+        .call_tool("add_sample", json!({"path": &primary, "build": "GRCh38"}))
+        .await;
+    let b1: Value = serde_json::from_str(extract_text(&r1)).unwrap();
+    let primary_name = b1["name"].as_str().unwrap().to_string();
+    assert_eq!(
+        b1["adjacent"].as_array().unwrap().len(),
+        1,
+        "first add registers the cnv sibling"
+    );
+
+    let _r2 = h
+        .call_tool("add_sample", json!({"path": &primary, "build": "GRCh38"}))
+        .await;
+
+    // The cnv sibling must appear exactly once in the registry.
+    let list = h.call_tool("list_samples", json!({})).await;
+    let samples: Vec<Value> = serde_json::from_str(extract_text(&list)).unwrap();
+    let cnv_name = format!("{primary_name}-cnv");
+    let count = samples
+        .iter()
+        .filter(|s| s["name"].as_str() == Some(cnv_name.as_str()))
+        .count();
+    assert_eq!(count, 1, "cnv sibling should not be double-registered");
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn remove_sample_works() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
