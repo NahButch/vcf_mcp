@@ -64,7 +64,12 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Return the running server's identity: vcf-mcp version, embedded Ensembl gene-table release per build, and the current count of registered samples. Use this when the user asks what version they're talking to or what reference data is in play."
+        description = "Return the running server's identity: vcf-mcp version, embedded Ensembl gene-table release per build, and the current count of registered samples. Use this when the user asks what version they're talking to or what reference data is in play.",
+        annotations(
+            title = "Get server info",
+            read_only_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn server_info(&self) -> Result<CallToolResult, McpError> {
         let _t = PerfTimer::start("tool:server_info");
@@ -72,7 +77,8 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "List the VCF samples currently registered on this server. Returns name, genome build, description, and absolute vcf_path for each. Returns an empty list if no samples are registered yet — use add_sample to register one."
+        description = "List the VCF samples currently registered on this server. Returns name, genome build, description, and absolute vcf_path for each. Returns an empty list if no samples are registered yet — use add_sample to register one.",
+        annotations(title = "List samples", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_samples(&self) -> Result<CallToolResult, McpError> {
         let _t = PerfTimer::start("tool:list_samples");
@@ -82,7 +88,14 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Register a bgzipped VCF file as a queryable sample. Pass an absolute file path ending in .vcf.gz. No tabix .tbi file is required — the server builds the index in memory (and uses an existing .tbi as a fast-load shortcut only if one happens to be present). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a probe query before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. By default (scan_adjacent=true), after the primary registers the server also scans the same directory for sibling VCFs sharing the primary's stem but differing by a variant-class token — e.g. a .snp-indel.genome.vcf.gz primary will pull in .cnv.vcf.gz, .sv.vcf.gz, .mitochondrial.vcf.gz siblings, registered as {name}-cnv, {name}-sv, {name}-mt. The response lists registered siblings in `adjacent` and any that failed validation in `adjacent_skipped`. Set scan_adjacent=false to register only the single named file. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended."
+        description = "Register a bgzipped VCF file as a queryable sample. Pass an absolute file path ending in .vcf.gz. No tabix .tbi file is required — the server builds the index in memory (and uses an existing .tbi as a fast-load shortcut only if one happens to be present). The server validates BGZF magic, opens the file with noodles, checks header structure, and runs a probe query before accepting. Genome build is auto-detected from the VCF header when possible; pass `build` explicitly if detection fails. Name is auto-derived from the filename; pass `name` to override. By default (scan_adjacent=true), after the primary registers the server also scans the same directory for sibling VCFs sharing the primary's stem but differing by a variant-class token — e.g. a .snp-indel.genome.vcf.gz primary will pull in .cnv.vcf.gz, .sv.vcf.gz, .mitochondrial.vcf.gz siblings, registered as {name}-cnv, {name}-sv, {name}-mt. The response lists registered siblings in `adjacent` and any that failed validation in `adjacent_skipped`. Set scan_adjacent=false to register only the single named file. Re-adding the same path is idempotent — the existing entry is returned, no duplicate. On name collision with a different file, a random suffix is appended.",
+        annotations(
+            title = "Register sample",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn add_sample(
         &self,
@@ -108,7 +121,14 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Scan a folder for .vcf.gz files and register each that passes validation. Set recursive=true to walk subdirectories. Default max_files is 50; server hard cap is 200. If the folder contains more VCFs than max_files, the call errors with a hint telling the caller exactly which value to re-call with. Per-file validation failures don't abort the scan — they collect in a `skipped` array with the reason per file. Use this when the user pastes a folder path instead of file paths."
+        description = "Scan a folder for .vcf.gz files and register each that passes validation. Set recursive=true to walk subdirectories. Default max_files is 50; server hard cap is 200. If the folder contains more VCFs than max_files, the call errors with a hint telling the caller exactly which value to re-call with. Per-file validation failures don't abort the scan — they collect in a `skipped` array with the reason per file. Use this when the user pastes a folder path instead of file paths.",
+        annotations(
+            title = "Register folder",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn add_samples_from_folder(
         &self,
@@ -130,7 +150,14 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Unregister a sample by name. Does not delete the underlying VCF file. Returns the removed sample's details if it existed."
+        description = "Unregister a sample by name. Does not delete the underlying VCF file. Returns the removed sample's details if it existed.",
+        annotations(
+            title = "Remove sample",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn remove_sample(
         &self,
@@ -145,7 +172,14 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Reset the sample registry — drops every registered sample, the per-sample tabix and rsid caches, and rewrites the state file as empty. Destructive: requires `confirm: true`; refuses otherwise. Useful as a workflow / cowork step (clean slate before re-registering a new cohort, end-of-session cleanup, scheduled refresh). Returns the list of what was removed so the caller can mirror it elsewhere or re-register if needed."
+        description = "Reset the sample registry — drops every registered sample, the per-sample tabix and rsid caches, and rewrites the state file as empty. Destructive: requires `confirm: true`; refuses otherwise. Useful as a workflow / cowork step (clean slate before re-registering a new cohort, end-of-session cleanup, scheduled refresh). Returns the list of what was removed so the caller can mirror it elsewhere or re-register if needed.",
+        annotations(
+            title = "Reset registry",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn reset_samples(
         &self,
@@ -159,7 +193,8 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Return variant calls overlapping a chromosome region. Coordinates are 1-based inclusive. Chromosome may be given with or without the 'chr' prefix; the server normalizes to the file's convention. Multi-allelic ALTs are comma-separated. The result is capped at 500 records; when more would match, `truncated` is true."
+        description = "Return variant calls overlapping a chromosome region. Coordinates are 1-based inclusive. Chromosome may be given with or without the 'chr' prefix; the server normalizes to the file's convention. Multi-allelic ALTs are comma-separated. The result is capped at 500 records; when more would match, `truncated` is true.",
+        annotations(title = "Query region", read_only_hint = true, open_world_hint = false)
     )]
     async fn query_region(
         &self,
@@ -181,7 +216,8 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Return variants in a gene's coordinates using the embedded Ensembl 115 (GRCh38) / 87 (GRCh37) gene table. Gene symbol is case-insensitive HGNC (e.g. COL1A1, brca1). Optional `flank_bp` extends the queried window on each side. If the gene is unknown, the error suggests close matches."
+        description = "Return variants in a gene's coordinates using the embedded Ensembl 115 (GRCh38) / 87 (GRCh37) gene table. Gene symbol is case-insensitive HGNC (e.g. COL1A1, brca1). Optional `flank_bp` extends the queried window on each side. If the gene is unknown, the error suggests close matches.",
+        annotations(title = "Query gene", read_only_hint = true, open_world_hint = false)
     )]
     async fn query_gene(
         &self,
@@ -202,7 +238,12 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Run the same query across multiple samples and merge the per-sample results into one position-keyed table. The `query` field is either {\"rsids\": [...]} (uses lookup_rsids; max 100) or {\"chrom\": ..., \"start\": ..., \"end\": ...} (uses query_region; max 10 Mb, 500 records per sample). For each variant any sample has, every sample gets an entry — `found: false` when that sample has no matching call. Minimum 2 samples."
+        description = "Run the same query across multiple samples and merge the per-sample results into one position-keyed table. The `query` field is either {\"rsids\": [...]} (uses lookup_rsids; max 100) or {\"chrom\": ..., \"start\": ..., \"end\": ...} (uses query_region; max 10 Mb, 500 records per sample). For each variant any sample has, every sample gets an entry — `found: false` when that sample has no matching call. Minimum 2 samples.",
+        annotations(
+            title = "Compare samples",
+            read_only_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn compare_samples(
         &self,
@@ -229,7 +270,12 @@ impl VcfServer {
     }
 
     #[tool(
-        description = "Look up variants by dbSNP rsid. First call against a sample triggers a one-time cache build (streams the full VCF, takes seconds-to-minutes depending on file size). Returns one entry per input rsid in input order; entries not found yield {rsid, found: false}. Maximum 100 rsids per call."
+        description = "Look up variants by dbSNP rsid. First call against a sample triggers a one-time cache build (streams the full VCF, takes seconds-to-minutes depending on file size). Returns one entry per input rsid in input order; entries not found yield {rsid, found: false}. Maximum 100 rsids per call.",
+        annotations(
+            title = "Look up rsIDs",
+            read_only_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn lookup_rsids(
         &self,
