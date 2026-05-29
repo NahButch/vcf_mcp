@@ -546,6 +546,10 @@ binary via `include_str!` at the next build.
 - **Test fixture**: [GIAB NA12878 / HG001 v4.2.1 benchmark VCF](https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/NA12878_HG001/latest/),
   sliced to chr17:50100000-50300000 (COL1A1 region).
 
+## Contact
+
+Open an issue on the repository, or email **`<CONTACT_EMAIL>`**.
+
 ## License
 
 [MIT](LICENSE).
