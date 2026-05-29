@@ -22,8 +22,23 @@ data/ensembl/
 *.vcf.gz
 *.vcf.gz.tbi
 *.gtf.gz
+*.bam
+*.bai
+*.cram
+*.crai
+*.fastq
+*.fastq.gz
 !tests/data/**/*.vcf.gz
 !tests/data/**/*.vcf.gz.tbi
+
+# Server-persisted state (normally lives in %APPDATA% / ~/.local; ignore here too)
+state.json
+
+# Local working / scratch docs that may contain absolute paths
+docs/todo.html
+
+# Git history-rewrite backup bundles (must never be re-committed)
+*.bundle
 
 # Coverage / profiling
 *.profraw
