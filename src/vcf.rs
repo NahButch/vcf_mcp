@@ -854,6 +854,154 @@ pub async fn lookup_rsids(
     })
 }
 
+pub struct FunGeneticsPanelArgs {
+    /// Samples to run the panel against. Empty / None = all registered samples.
+    pub samples: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PanelMarkerResult {
+    pub rsid: String,
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<VariantRecord>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PanelSampleResult {
+    pub sample: String,
+    pub markers: Vec<PanelMarkerResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FunPanelRow {
+    pub category: String,
+    #[serde(rename = "trait")]
+    pub trait_name: String,
+    pub gene: String,
+    pub marker: String,
+    /// "rsid" (genotype attached) or "gene_region" (follow up with query_gene).
+    pub marker_type: &'static str,
+    pub effect_allele: String,
+    pub direction: String,
+    pub samples: Vec<PanelSampleResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FunGeneticsPanelResponse {
+    pub samples: Vec<String>,
+    pub trait_count: usize,
+    pub rsid_count: usize,
+    pub rows: Vec<FunPanelRow>,
+    pub disclaimer: &'static str,
+}
+
+/// Run the embedded "Fun Genetics Starter Panel" against one or more samples.
+///
+/// This is a data layer only: it looks up the panel's curated rsIDs per sample
+/// and returns each trait row joined with the raw genotype plus the curator's
+/// direction note. All scoring, ALT/effect-allele orientation, interpretation,
+/// and rendering are left to the assistant. Gene-region rows (opsins,
+/// GNPTAB/NAGPA) carry no genotype — they're flagged for `query_gene` follow-up.
+pub async fn fun_genetics_panel(
+    registry: Arc<SampleRegistry>,
+    cache: Arc<RsidCache>,
+    args: FunGeneticsPanelArgs,
+) -> Result<FunGeneticsPanelResponse> {
+    let target_names: Vec<String> = match args.samples {
+        Some(ref v) if !v.is_empty() => v.clone(),
+        _ => registry.list().into_iter().map(|s| s.name).collect(),
+    };
+    if target_names.is_empty() {
+        return Err(Error::NoSamples);
+    }
+    let mut samples: Vec<Sample> = Vec::with_capacity(target_names.len());
+    for name in &target_names {
+        let s = registry
+            .get(name)
+            .ok_or_else(|| Error::SampleNotFound(name.clone()))?;
+        samples.push(s);
+    }
+
+    let rsids: Vec<String> = crate::fun_panel::unique_rsids().to_vec();
+
+    // Per sample: ensure the rsID cache is warm, then look up every panel rsID
+    // in one blocking pass. lookup_rsids_blocking has no per-call cap (the 100
+    // cap lives in the public lookup_rsids), so the whole deduped list is fine.
+    let mut per_sample: HashMap<String, HashMap<String, LookupRsidEntry>> = HashMap::new();
+    for sample in &samples {
+        let idx = ensure_rsid_index(&cache, sample).await?;
+        let sample_owned = sample.clone();
+        let registry_for_blocking = registry.clone();
+        let rsids_owned = rsids.clone();
+        let entries = tokio::task::spawn_blocking(move || {
+            lookup_rsids_blocking(&sample_owned, &registry_for_blocking, &idx, &rsids_owned)
+        })
+        .await
+        .map_err(|e| Error::VcfRead {
+            path: sample.vcf_path.clone(),
+            message: format!("panel lookup join: {e}"),
+        })??;
+        let map: HashMap<String, LookupRsidEntry> =
+            entries.into_iter().map(|e| (e.rsid.clone(), e)).collect();
+        per_sample.insert(sample.name.clone(), map);
+    }
+
+    const GENE_REGION_NOTE: &str = "Gene-region trait: no rsID genotype here. Call query_gene on this gene per sample (results are raw variants, without functional-consequence annotation).";
+    let panel = crate::fun_panel::entries();
+    let mut rows = Vec::with_capacity(panel.len());
+    for e in panel {
+        let (marker_type, note): (&'static str, Option<&'static str>) = if e.is_gene_region() {
+            ("gene_region", Some(GENE_REGION_NOTE))
+        } else {
+            ("rsid", None)
+        };
+        let mut sample_results = Vec::new();
+        if !e.is_gene_region() {
+            for sample in &samples {
+                let map = &per_sample[&sample.name];
+                let markers: Vec<PanelMarkerResult> = e
+                    .rsids
+                    .iter()
+                    .map(|rid| {
+                        let entry = map.get(rid);
+                        PanelMarkerResult {
+                            rsid: rid.clone(),
+                            found: entry.map(|x| x.found).unwrap_or(false),
+                            variant: entry.and_then(|x| x.variant.clone()),
+                        }
+                    })
+                    .collect();
+                sample_results.push(PanelSampleResult {
+                    sample: sample.name.clone(),
+                    markers,
+                });
+            }
+        }
+        rows.push(FunPanelRow {
+            category: e.category.clone(),
+            trait_name: e.trait_name.clone(),
+            gene: e.gene.clone(),
+            marker: e.marker.clone(),
+            marker_type,
+            effect_allele: e.effect_allele.clone(),
+            direction: e.direction.clone(),
+            samples: sample_results,
+            note,
+        });
+    }
+
+    Ok(FunGeneticsPanelResponse {
+        samples: samples.iter().map(|s| s.name.clone()).collect(),
+        trait_count: rows.len(),
+        rsid_count: rsids.len(),
+        rows,
+        disclaimer: "Curiosity, not medical advice. A single SNP is a weak vote; lived phenotype and current literature override any one marker. Resolve ALT vs effect-allele orientation on GRCh38 before interpreting. Confirm pharmacogenomic rows with a clinician.",
+    })
+}
+
 async fn ensure_rsid_index(cache: &RsidCache, sample: &Sample) -> Result<Arc<RsidIndex>> {
     if let Some(idx) = cache.get(&sample.name) {
         tracing::info!(

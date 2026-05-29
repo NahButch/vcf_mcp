@@ -1,0 +1,97 @@
+category	trait	gene	marker	effect_allele	direction
+Taste & Smell	Bitter (PTC) tasting	TAS2R38	rs713598	G	G/het = taster (broccoli, coffee, tonic taste bitter)
+Taste & Smell	Bitter tasting (confirm)	TAS2R38	rs1726866	A	part of taster haplotype
+Taste & Smell	Cilantro soapy taste	OR6A2	rs72921001	(variant)	variant = cilantro tastes like soap; ref = herby
+Taste & Smell	Alcohol flush reaction	ALDH2	rs671	A	A = Asian-flush (rare in Europeans); ref = no flush
+Taste & Smell	Fast alcohol breakdown	ADH1B	rs1229984	C(=His48)	faster first-step alcohol metabolism
+Taste & Smell	Caffeine metabolism speed	CYP1A2	rs762551	A	A = fast metabolizer; C = slow (caffeine lingers)
+Taste & Smell	Caffeine jitters / anxiety	ADORA2A	rs5751876	C(T)	CC = higher caffeine anxiety/sleep disruption
+Taste & Smell	Sweet preference (GLUT2)	SLC2A2	rs5400	T	weak nudge toward sweet intake
+Earwax, Skin & Body	Earwax & body-odor type	ABCC11	rs17822931	(ref)	ref = wet earwax + normal odor; variant (A) = dry earwax + low odor
+Earwax, Skin & Body	Light skin pigment	SLC45A2	rs16891982	G	G = European light-skin allele
+Earwax, Skin & Body	Freckling & sun response	IRF4	rs12203592	T	T = freckles, lighter hair, easier greying
+Eyes & Hair	Blue vs brown eyes	HERC2	rs12913832	G	GG = blue/light eyes (strongest single predictor)
+Eyes & Hair	Eye-color modifier	OCA2	rs1800407	T	nudge toward green/hazel/lighter
+Eyes & Hair	Hair/eye melanin (TYR)	TYR	rs1042602	A	minor lightening of hair/eyes
+Eyes & Hair	Hair shade (HERC2)	HERC2	rs1393350	A	lighter brown/blond, esp. childhood
+Eyes & Hair	Hair shade (SLC24A4)	SLC24A4	rs12896399	T	pigment-lightening (blond/light brown)
+Eyes & Hair	Hair curl — TCHH	TCHH	rs35264875	(variant)	real European curl/straightness gene
+Eyes & Hair	Hair curl — WNT10A	WNT10A	rs7349332	(variant)	real European-curl gene (with TCHH)
+Eyes & Hair	Curly/straight — EDAR	EDAR	rs3827760	G	G = East-Asian thick/straight hair; ref in Europeans
+Diet & Metabolism	Lactase persistence (milk)	MCM6	rs4988235	A(T allele on +strand)	persister allele = digest lactose as adult
+Diet & Metabolism	Lactase persistence #2	MCM6	rs182549	T	confirms persistence
+Diet & Metabolism	Type-2 diabetes risk (top)	TCF7L2	rs7903146	T	largest common T2D risk allele
+Diet & Metabolism	T2D / zinc transporter	SLC30A8	rs13266634	(alt)	minor T2D risk
+Diet & Metabolism	Fasting glucose (GCK)	GCK	rs1799884	T	small raise in fasting glucose
+Diet & Metabolism	Fat-mass appetite (FTO)	FTO	rs9930506	G	higher appetite/BMI tendency
+Diet & Metabolism	Waist/insulin (IRS1)	IRS1	rs2943641	C	insulin signaling / fat storage
+Diet & Metabolism	Appetite/BMI (MC4R)	MC4R	rs17782313	C	small appetite/weight push
+Diet & Metabolism	Adiponectin/insulin (ADIPOQ)	ADIPOQ	rs266729	G	minor blood-sugar/fat regulation
+Diet & Metabolism	Triglyceride clearance (APOA5)	APOA5	rs662799	A(=alt)	higher triglycerides / slower fat clearing
+Diet & Metabolism	Secretor / B12 / norovirus	FUT2	rs601338	A	A homozyg = secretor (B12, norovirus-susceptible); resolve orientation!
+Athletic & Muscle	Sprint vs endurance (ACTN3)	ACTN3	rs1815739	T	TT = no fast-twitch ACTN3 (endurance/"non-sprinter")
+Athletic & Muscle	Aerobic capacity (PPARGC1A)	PPARGC1A	rs8192678	T	endurance/mitochondrial adaptation
+Athletic & Muscle	Power/endurance (ADRB2)	ADRB2	rs1042714	C	fat metabolism / exercise bronchodilation
+Athletic & Muscle	Metabolic rate (ADRB3)	ADRB3	rs4994	G	small effect on resting metabolic rate
+Brain, Mood & Behavior	COMT 'warrior/worrier'	COMT	rs4680	A(Met)	AA = 'worrier' (slow dopamine clearance, focus vs stress)
+Brain, Mood & Behavior	COMT haplotype	COMT	rs4633	T	high-pain-sensitivity haplotype member
+Brain, Mood & Behavior	Dopamine reward (DRD2/ANKK1)	ANKK1	rs1800497	A(Taq1A)	lower D2 density; reward/motivation/habit
+Brain, Mood & Behavior	Novelty seeking (DRD4)	DRD4	rs1800955	C	weak novelty-seeking association
+Pharmacogenomics	Codeine/tramadol activation (CYP2D6*4)	CYP2D6	rs3892097	T	TT ≈ poor metabolizer; codeine/tramadol weak; ~25% of drugs affected
+Pharmacogenomics	CYP2D6 *10	CYP2D6	rs1065852	A	reduced CYP2D6 activity
+Pharmacogenomics	CYP3A5 expression	CYP3A5	rs776746	C(=non-expresser on +strand)	CC = non-expresser (typical EU); resolve orientation
+Pharmacogenomics	Warfarin sensitivity (CYP2C9*2)	CYP2C9	rs1799853	T	reduced function → lower warfarin dose
+Pharmacogenomics	Warfarin sensitivity (CYP2C9*3)	CYP2C9	rs1057910	C	reduced function
+Pharmacogenomics	Warfarin dose (VKORC1)	VKORC1	rs9923231	T	dose-lowering allele
+Pharmacogenomics	Drug transport (MDR1/ABCB1)	ABCB1	rs1045642	(G/A per strand)	P-glycoprotein pump; gut/BBB drug transport
+Pharmacogenomics	Folate processing (MTHFR C677T)	MTHFR	rs1801133	A(T)	reduced folate enzyme, higher homocysteine
+Pharmacogenomics	Folate processing (MTHFR A1298C)	MTHFR	rs1801131	G(C)	minor folate-metabolism effect
+Immune & Inflammation	Nicotine dependence	CHRNA5	rs16969968	A	heavier dependence if smoker
+Immune & Inflammation	IL-6 inflammation tone	IL6	rs1800795	(G/C)	baseline IL-6 inflammatory signaling
+Immune & Inflammation	Hemochromatosis C282Y	HFE	rs1800562	A	iron-overload mutation (rare); ref = low risk
+Immune & Inflammation	HIV resistance (CCR5-Δ32)	CCR5	rs333	del32	deletion blocks main HIV entry route
+Cardio & Lipids	APOE risk position	APOE	rs7412	T(=e2 contributor)	needs rs429358 too for full APOE call
+Cardio & Lipids	LDL receptor splicing	LDLR	rs688	T	small LDL-handling effect
+Sensory & Misc	Photic sneeze reflex (ACHOO)	near ZEB2	rs10427255	T	T = sneeze in bright sunlight (very self-verifiable)
+Sensory & Misc	Longevity-associated (FOXO3)	FOXO3	rs2802292	T(=G/T per strand)	allele over-represented in very-old age
+Sensory & Misc	p53 codon 72 (Arg/Pro)	TP53	rs1042522	G(Arg)	small cell-stress-response variant
+Sleep & Circadian	Morning vs night person (CLOCK)	CLOCK	rs1801260	G	later/evening chronotype lean
+Sleep & Circadian	Serotonin 2A (sleep/mood)	HTR2A	rs6313	A	minor sleep/serotonin effect
+Treats, Chocolate & Reward	Chocolate liking / intake	chr12 OAS region	rs2287161	G	GWAS hit for higher chocolate consumption (small)
+Treats, Chocolate & Reward	Dopamine reward — D2	ANKK1	rs1800497	A	reward sensitivity / treat cravings (see COMT row too)
+Smell & Aversions	Asparagus-pee: can you smell it?	OR2M7 cluster	rs4481887	A(=stronger smelling)	POLYGENIC, weak single SNP; lived phenotype wins; direction note critical
+Smell & Aversions	Androstenone musk (sweaty vs sweet)	OR7D4	rs61729907 (R88W)	A(=WM, weak)	RT/RT = very sensitive/foul; WM copies = less sensitive
+Smell & Aversions	Cilantro soapy smell	OR6A2	rs72921001	(variant)	variant = soapy
+Teeth & Tooth Shape	Shovel incisors / tooth form (EDAR)	EDAR	rs3827760	G	East-Asian shovel incisors; ref = standard EU
+Teeth & Tooth Shape	Tooth development (WNT10A)	WNT10A	rs7349332	(rare variant)	missing-teeth cause; can make canines look fang-like
+Vision & Glasses	Myopia / nearsightedness (GJD2)	15q14 GJD2	rs524952	A	strongest common myopia locus
+Vision & Glasses	Myopia (GJD2 confirm)	15q14	rs634990	C	reinforces myopia signal
+Vision & Glasses	Refractive error (RASGRF1)	RASGRF1	rs66913363	C	eye-growth / refractive error
+Vision & Glasses	Eye growth modifier (15q14)	15q14	rs11073058	T	small added myopia lean
+Color Vision (X-linked)	Red-green color blindness	OPN1LW / OPN1MW	Xq28 region	(functional variant)	scan opsins for non-synonymous variants; males hemizygous; X is 100% maternal in sons. Caveat: short reads can't fully resolve near-identical opsin array
+Color Vision (X-linked)	Blue-yellow vision (tritan)	OPN1SW	chr7	(variant)	rare blue-cone defect
+Motion Sickness	Motion sickness susceptibility	near MUTED/MED region	rs66800491	A	car/sea/VR sickness lean
+Motion Sickness	Motion sickness modifier	PVRL3/nectin region	rs2179994	(alt)	second small-effect marker
+Speech & Fluency	Stuttering (lysosomal genes)	GNPTAB / NAGPA	region	(rare pathogenic missense)	scan for RARE disease variants; common SNPs = benign. Lysosomal "recycling" genes — some stuttering is cell-trafficking, not psychology
+Pain & Perception	Pain sensitivity (COMT haplotype)	COMT	rs4633	T	high-pain-sensitivity haplotype
+Pain & Perception	Capsaicin / heat pain (TRPV1)	TRPV1	rs222747 (M315I)	G	spice/heat perception (mostly exposure-trained)
+Pain & Perception	Opioid receptor (OPRM1 A118G)	OPRM1	rs1799971	G	G = may need higher opioid dose; ref = standard
+More on Pain Processing	Sodium channel / pain gain (SCN9A)	SCN9A	rs6749443	(alt)	master pain Na-channel; tunes everyday pain threshold
+More on Pain Processing	Pain & inflammation modifier (chr17)	chr17 region	rs4458044	(variant)	minor pain/inflammatory signaling
+Body, Stature & Joints	Adult height (HMGA2)	HMGA2	rs1042725	T	one of few height SNPs with measurable effect (~+0.4cm/copy)
+Body, Stature & Joints	Height / bone growth (GDF5)	GDF5	rs143383	A	long-bone growth, height, joint/osteoarthritis risk
+Body, Stature & Joints	Lean mass / metabolism (FTO)	FTO	rs9930506	G	appetite allele (see Diet)
+Bugs, Feet & Body Odor	Smelly feet / body odor (ABCC11)	ABCC11	rs17822931	(ref)	ref = normal odor-feeding sweat; variant = low odor + dry earwax
+Endocannabinoid System	Anandamide breakdown — FAAH C385A	FAAH	rs324420	A	A = slower anandamide breakdown → higher baseline, lower-anxiety/faster fear-extinction
+Endocannabinoid System	FAAH regulatory variant	FAAH	rs2295633	G	emotional memory / reward association
+Endocannabinoid System	CB1 receptor (CNR1) — Thr453	CNR1	rs1049353	T	pain/mood/reward signaling
+Endocannabinoid System	CB1 receptor (CNR1) — promoter	CNR1	rs2023239	C	cannabis response, reward, appetite
+Endocannabinoid System	CB1 haplotype (shared markers)	CNR1	rs806377 / rs806368	(het)	general CB1 signaling
+Endocannabinoid System	CB1 downstream (CNR1 3')	CNR1	rs2180619	A	anxiety / wellbeing association
+Plant Cannabinoid Processing	THC clearance — CYP2C9 *2	CYP2C9	rs1799853	T	reduced fn → slower THC clearance, stronger/longer effect per dose
+Plant Cannabinoid Processing	THC clearance — CYP2C9 *3	CYP2C9	rs1057910	C	compounds slow-THC picture
+Plant Cannabinoid Processing	CBD / CBN handling — CYP3A5	CYP3A5	rs776746	(non-expresser)	CBD/CBN via CYP3A4/3A5; CBD also inhibits these (grapefruit effect)
+Plant Cannabinoid Processing	Caffeine + cannabinoid overlap — CYP1A2	CYP1A2	rs762551	A	minor shared metabolism
+CBD: Second Enzyme & Non-Classical Targets	CBD metabolism — CYP2C19 status	CYP2C19	rs4244285 (*2) / rs4986893 (*3) / rs12248560 (*17)	(LoF or *17)	none = normal metabolizer
+CBD: Second Enzyme & Non-Classical Targets	CBD direct target — TRPV1	TRPV1	rs222747	G	CBD acts directly on TRPV1 (pain/inflammation)
+CBD: Second Enzyme & Non-Classical Targets	CBD direct target — GPR55	GPR55	rs4607498	(variant)	"third cannabinoid receptor" CBD blocks; pain/bone/inflammation

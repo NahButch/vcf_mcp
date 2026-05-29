@@ -395,6 +395,59 @@ async fn list_samples_returns_configured_samples() {
 }
 
 #[tokio::test]
+async fn fun_genetics_panel_returns_curated_rows() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h
+        .call_tool("fun_genetics_panel", json!({"samples": ["NA12878"]}))
+        .await;
+    assert!(!is_error_response(&resp));
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+
+    assert_eq!(body["samples"], json!(["NA12878"]));
+    let rows = body["rows"].as_array().unwrap();
+    assert!(rows.len() > 80, "expected full panel, got {}", rows.len());
+    assert_eq!(body["trait_count"].as_u64().unwrap() as usize, rows.len());
+    assert!(body["rsid_count"].as_u64().unwrap() <= 100);
+    assert!(
+        body["disclaimer"]
+            .as_str()
+            .unwrap()
+            .contains("not medical advice")
+    );
+
+    // rsID rows carry per-sample markers; the 'trait' key is present (renamed).
+    let rsid_row = rows
+        .iter()
+        .find(|r| r["marker_type"] == "rsid")
+        .expect("an rsid row");
+    assert!(rsid_row.get("trait").is_some());
+    let row_samples = rsid_row["samples"].as_array().unwrap();
+    assert_eq!(row_samples.len(), 1);
+    assert_eq!(row_samples[0]["sample"], "NA12878");
+    assert!(!row_samples[0]["markers"].as_array().unwrap().is_empty());
+
+    // Gene-region rows (opsins, GNPTAB/NAGPA) are flagged for query_gene.
+    let gene_row = rows
+        .iter()
+        .find(|r| r["marker_type"] == "gene_region")
+        .expect("a gene_region row");
+    assert!(gene_row["note"].as_str().unwrap().contains("query_gene"));
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn fun_genetics_panel_defaults_to_all_samples() {
+    let mut h = McpHarness::start(&fixture_config_path()).await;
+    let resp = h.call_tool("fun_genetics_panel", json!({})).await;
+    assert!(!is_error_response(&resp));
+    let body: Value = serde_json::from_str(extract_text(&resp)).unwrap();
+    let samples = body["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2, "default scope should be all registered");
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn query_region_returns_variants_in_range() {
     let mut h = McpHarness::start(&fixture_config_path()).await;
     let resp = h

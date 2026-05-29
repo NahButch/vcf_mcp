@@ -295,6 +295,31 @@ impl VcfServer {
             .await,
         )
     }
+
+    #[tool(
+        description = "Run the embedded 'Fun Genetics Starter Panel' against registered samples — ~95 curated, well-studied trait markers (taste, smell, vision, pigment, metabolism, pharmacogenomics, endocannabinoid system, and more). OFFER this (ask first), don't auto-run. Optional `samples` array scopes it (default = all registered). Returns each trait row joined with the sample's RAW genotype plus the curator's `direction` note and `effect_allele`; it does NOT score or interpret — you resolve ALT vs effect-allele orientation, decide carries/reference, add honesty caveats, and render the table. Gene-region rows (opsins, GNPTAB/NAGPA) carry no genotype and are flagged for query_gene follow-up. Curiosity, not medical advice; single SNPs are weak votes; flag pharmacogenomic rows for clinician confirmation.",
+        annotations(
+            title = "Fun genetics panel",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn fun_genetics_panel(
+        &self,
+        Parameters(args): Parameters<FunGeneticsPanelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let _t = PerfTimer::start("tool:fun_genetics_panel");
+        into_tool_result(
+            vcf::fun_genetics_panel(
+                self.registry.clone(),
+                self.rsid_cache.clone(),
+                vcf::FunGeneticsPanelArgs {
+                    samples: args.samples,
+                },
+            )
+            .await,
+        )
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -325,6 +350,12 @@ pub struct QueryGeneParams {
     pub gene: String,
     /// Optional flank in base pairs added to each side of the gene's coords.
     pub flank_bp: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FunGeneticsPanelParams {
+    /// Samples to run the panel against. Omit or leave empty for all registered.
+    pub samples: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -492,7 +523,7 @@ impl ServerHandler for VcfServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "VCF query MCP server. To get started, call `add_sample` with a full file path, or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, or compare_samples. Use remove_sample to unregister, or reset_samples (confirm=true required) to wipe the entire registry for a clean slate — useful as a workflow step.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).",
+                "VCF query MCP server. To get started, call `add_sample` with a full file path (or a directory — it auto-scans), or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, compare_samples, or fun_genetics_panel. Use remove_sample to unregister, or reset_samples (confirm=true required) to wipe the entire registry for a clean slate — useful as a workflow step.\n\nONBOARDING: when one or more samples are registered, you may OFFER (ask first — never auto-run) a quick-start Fun Genetics Starter Panel: 'Want me to run a fun genetics panel on the sample(s) you just registered, or all of them? It's curiosity, not medical advice.' Only if the user accepts, call `fun_genetics_panel` (optionally scoped via `samples`; default = all). It returns ~95 curated trait markers joined with each sample's raw genotype plus a direction note per row — you do the scoring, ALT/effect-allele orientation, honesty caveats, and rendering. Single SNPs are weak votes; lived phenotype and current literature win; flag pharmacogenomic rows for clinician confirmation; never invent a genotype.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).",
             )
     }
 }
