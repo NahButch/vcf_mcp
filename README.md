@@ -548,7 +548,7 @@ binary via `include_str!` at the next build.
 
 ## Contact
 
-Open an issue on the repository, or email **`<CONTACT_EMAIL>`**.
+Open an issue on the repository, or email **`nah_butch@outlook.com`**.
 
 ## License
 

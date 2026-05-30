@@ -89,7 +89,7 @@ involving patient care. See the [README](README.md#disclaimer) and
 ## Contact
 
 Questions about this policy or vcf-mcp's data handling:
-**`<MAINTAINER CONTACT — fill in before publishing>`**
+**`nah_butch@outlook.com`**
 
 ## Changes
 
