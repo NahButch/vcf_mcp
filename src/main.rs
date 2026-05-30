@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod error_log;
 mod fun_panel;
 mod genes;
 mod registry;

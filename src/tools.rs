@@ -489,14 +489,19 @@ fn domain_error_to_result(e: Error) -> CallToolResult {
 
     // Log every error that crosses the MCP boundary, tagged with kind +
     // category. Greppable via `error_category=unexpected` in
-    // mcp-server-vcf-mcp.log. Unexpected errors warn so they stand out.
+    // mcp-server-vcf-mcp.log. Unexpected errors warn so they stand out, and
+    // also append a scrubbed record to the local error log the user can attach
+    // when filing an issue.
     match category {
-        Category::Unexpected => tracing::warn!(
-            error_kind = kind,
-            error_category = category.as_str(),
-            error_message = %message,
-            "tool returned an unexpected error"
-        ),
+        Category::Unexpected => {
+            tracing::warn!(
+                error_kind = kind,
+                error_category = category.as_str(),
+                error_message = %message,
+                "tool returned an unexpected error"
+            );
+            crate::error_log::append_record(&e);
+        }
         _ => tracing::info!(
             error_kind = kind,
             error_category = category.as_str(),
@@ -513,7 +518,57 @@ fn domain_error_to_result(e: Error) -> CallToolResult {
     if let Some(h) = hint {
         payload["hint"] = serde_json::Value::String(h.to_string());
     }
+    // For unexpected errors only: hand the assistant a one-click GitHub
+    // new-issue URL (with version + kind prefilled, nothing else) and the
+    // local error-log path the user can voluntarily attach. The assistant
+    // must OFFER, never auto-submit — see the server `instructions`.
+    if matches!(category, Category::Unexpected) {
+        payload["report_url"] =
+            serde_json::Value::String(build_report_url(kind, category.as_str()));
+        if let Some(p) = crate::error_log::default_path() {
+            payload["error_log_path"] = serde_json::Value::String(p.display().to_string());
+        }
+    }
     CallToolResult::structured_error(payload)
+}
+
+/// Build a GitHub "new issue" URL with the version and error kind prefilled.
+/// Reads the repo from Cargo.toml's `repository` at compile time, so forks
+/// route to their own tracker. Contains NO file paths, sample names, or args.
+fn build_report_url(kind: &str, category: &str) -> String {
+    const REPO: &str = env!("CARGO_PKG_REPOSITORY");
+    const VERSION: &str = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "+build.",
+        env!("VCF_MCP_BUILD"),
+        ".",
+        env!("VCF_MCP_COMMIT"),
+    );
+    let title = format!("Error: {kind} in vcf-mcp v{VERSION}");
+    let body = format!(
+        "**vcf-mcp version:** {VERSION}\n\
+         **Error kind:** {kind}\n\
+         **Category:** {category}\n\n\
+         Please describe what you were trying to do. If you're comfortable, attach the local error.log shown in `error_log_path` — it contains only version + error kind metadata, no file paths or genomic data."
+    );
+    format!(
+        "{REPO}/issues/new?title={}&body={}",
+        percent_encode(&title),
+        percent_encode(&body)
+    )
+}
+
+/// Minimal RFC 3986 unreserved-character percent encoder for URL query values.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 #[tool_handler]
@@ -523,7 +578,40 @@ impl ServerHandler for VcfServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "VCF query MCP server. To get started, call `add_sample` with a full file path (or a directory — it auto-scans), or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, compare_samples, or fun_genetics_panel. Use remove_sample to unregister, or reset_samples (confirm=true required) to wipe the entire registry for a clean slate — useful as a workflow step.\n\nONBOARDING: when one or more samples are registered, you may OFFER (ask first — never auto-run) a quick-start Fun Genetics Starter Panel: 'Want me to run a fun genetics panel on the sample(s) you just registered, or all of them? It's curiosity, not medical advice.' Only if the user accepts, call `fun_genetics_panel` (optionally scoped via `samples`; default = all). It returns ~95 curated trait markers joined with each sample's raw genotype plus a direction note per row — you do the scoring, ALT/effect-allele orientation, honesty caveats, and rendering. Single SNPs are weak votes; lived phenotype and current literature win; flag pharmacogenomic rows for clinician confirmation; never invent a genotype.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).",
+                "VCF query MCP server. To get started, call `add_sample` with a full file path (or a directory — it auto-scans), or `add_samples_from_folder` with a directory containing .vcf.gz files. Genome build is auto-detected from the VCF header and the sample name is derived from the filename. Then query the registered samples via list_samples, query_region, lookup_rsids, query_gene, compare_samples, or fun_genetics_panel. Use remove_sample to unregister, or reset_samples (confirm=true required) to wipe the entire registry for a clean slate — useful as a workflow step.\n\nONBOARDING: when one or more samples are registered, you may OFFER (ask first — never auto-run) a quick-start Fun Genetics Starter Panel: 'Want me to run a fun genetics panel on the sample(s) you just registered, or all of them? It's curiosity, not medical advice.' Only if the user accepts, call `fun_genetics_panel` (optionally scoped via `samples`; default = all). It returns ~95 curated trait markers joined with each sample's raw genotype plus a direction note per row — you do the scoring, ALT/effect-allele orientation, honesty caveats, and rendering. Single SNPs are weak votes; lived phenotype and current literature win; flag pharmacogenomic rows for clinician confirmation; never invent a genotype.\n\nWhen a tool returns an error, the JSON-RPC error `data` field carries a triage hint: `category` is one of `user_input` (the user typed something the tool can't accept — help them fix their args), `user_data` (their VCF file or environment looks problematic — help them diagnose, e.g. re-download, check md5, recheck path), or `unexpected` (this looks like a vcf-mcp bug — consider offering the user to file an issue). `kind` is the stable error variant name (e.g. InvalidVcfFile, QueryTimeout).\n\nERROR REPORTING: on a `category: unexpected` error, the result also includes `report_url` (a pre-filled GitHub new-issue URL with the vcf-mcp version and error kind) and `error_log_path` (a local jsonl log of scrubbed records — version, kind, category, timestamp; no paths, sample names, or arg values). OFFER (ask first; NEVER auto-open or auto-submit): 'This looks like a vcf-mcp bug — want a link to file an issue? You can optionally attach your local error log at <error_log_path> if you're comfortable sharing it.' If the user accepts, present the URL and the path; they review and submit on GitHub themselves.",
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_encode_handles_url_unsafe_bytes() {
+        assert_eq!(percent_encode("hello"), "hello");
+        assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(
+            percent_encode("0.1.0+build.31.bb522e5"),
+            "0.1.0%2Bbuild.31.bb522e5"
+        );
+        assert_eq!(percent_encode("Error: VcfRead"), "Error%3A%20VcfRead");
+    }
+
+    #[test]
+    fn report_url_points_at_repo_with_version_and_kind_prefilled() {
+        let url = build_report_url("VcfRead", "unexpected");
+        assert!(url.starts_with("https://github.com/"));
+        assert!(url.contains("/issues/new?"));
+        assert!(url.contains("VcfRead"));
+        // Version chars get percent-encoded; "+build." becomes "%2Bbuild." in the query.
+        assert!(url.contains("%2Bbuild."));
+        // Bright-line privacy check: no path-like substrings in the URL.
+        for forbidden in ["C%3A", "Users", "OneDrive", "AppData", "tom_"] {
+            assert!(
+                !url.contains(forbidden),
+                "report URL leaks {forbidden:?}: {url}"
+            );
+        }
     }
 }
