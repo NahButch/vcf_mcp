@@ -69,3 +69,63 @@ in the background (which then warms the cache for the next call anyway).
   a build-speed problem.
 - Only then consider single-flighting the build or persisting indexes to a
   cache dir (never the source folder).
+
+---
+
+## Building on Windows 11 with Smart App Control (SAC)
+
+**Status:** environmental, not a vcf-mcp bug
+**Affects:** developers building from source on Windows 11 with SAC enforced
+
+Windows 11's Smart App Control nondeterministically blocks freshly-compiled,
+unsigned executables with `os error 4551` ("An Application Control policy has
+blocked this file"). It hits two distinct surfaces in this project's dev loop:
+
+1. **The built `vcf-mcp.exe`** — a clean release build can fail to launch
+   immediately after `cargo build --release`, even though the same file ran
+   minutes earlier. SAC's verdict is per file-hash, time-dependent, and not
+   user-overridable via a SmartScreen-style "Run anyway" button.
+2. **Crate build scripts** — every dependency's `build-script-build.exe` under
+   `target/release/build/<crate>-<hash>/` is also a fresh unsigned exe. After a
+   `rustup update`, all of them get recompiled and any one of them
+   (we've observed `proc-macro2`) can hit SAC and abort the build mid-compile.
+
+### Workarounds (no perfect fix while SAC is enforced)
+
+- **After a Rust toolchain bump, do a clean build:**
+  ```powershell
+  cargo clean
+  cargo build --release
+  ```
+  Fresh compiles produce new file hashes that SAC re-evaluates from scratch.
+  Retrying without `cargo clean` keeps hitting the same blocked hashes.
+- **After each rebuild, verify the binary actually launches** — don't trust the
+  "Finished" message alone:
+  ```powershell
+  & .\target\release\vcf-mcp.exe --version
+  ```
+  If it errors with "Application Control policy has blocked this file," another
+  `cargo clean && cargo build --release` (or a short wait) usually clears it.
+- **Kill child processes before rebuilding** — Windows locks running `.exe`s,
+  so MCP clients holding the server process must be told to exit:
+  ```powershell
+  Get-Process -Name vcf-mcp -ErrorAction SilentlyContinue | Stop-Process -Force
+  ```
+
+### What does *not* reliably help
+
+- **Self-signing** the binary with a `New-SelfSignedCertificate` cert plus
+  Trusted-Publishers install: in our testing the self-signed signature ended up
+  `UnknownError` (no machine-wide trust chain), and SAC's verdict was still
+  driven by hash reputation rather than the embedded signature. Some builds ran
+  signed; others ran unsigned; the signing wasn't the deciding factor.
+- **Retrying without `cargo clean`** after the first block — same hash, same
+  verdict.
+
+### The reliable cures (not recommended for a personal dev box)
+
+- **EV (Extended Validation) code-signing certificate** — chains to a CA SAC's
+  intelligence recognizes; deterministic allow. Significant cost; appropriate
+  for distributing signed releases, overkill for self-built dev binaries.
+- **Turn SAC off** — eliminates all of the above. **This is irreversible
+  without a Windows reset/reinstall**; never do it casually.
