@@ -32,7 +32,7 @@ privacy policy**. Both are fully in our control.
 | Gatekeeping | Human review (~2 weeks) | Automated namespace-ownership check |
 | Submit via | Desktop extension submission form (`clau.de/desktop-extention-submission`) | `mcp-publisher` CLI |
 | Hard requirement | Privacy policy in **both** README **and** manifest.json; tool annotations; production-ready | Publicly available install method + `mcpName` validation metadata |
-| Namespace | n/a | `io.github.<you>/vcf-mcp` (GitHub-auth'd) |
+| Namespace | n/a | `io.github.<username>/vcf-mcp` (GitHub-auth'd) |
 
 Recommended order: **Registry first** (fast, automated, low-risk), then the
 **Desktop Extensions directory** (slower human review, where the health-data
@@ -73,9 +73,9 @@ question lives).
   `annotations(...)` argument.)
 
 - [ ] **Write `PRIVACY.md`** and mirror a privacy section in the README. Must
-      cover: data **collected** (none beyond local file paths/names you supply),
+      cover: data **collected** (none beyond local file paths/names supplied),
       **storage** (local `state.json` only; index/rsid caches in memory),
-      **sharing** (none — no network calls), **retention** (until you
+      **sharing** (none — no network calls), **retention** (until
       `remove_sample`/`reset_samples` or delete the state file), and a
       **contact**. This is also a manifest.json field for MCPB.
 - [ ] **Expand README usage docs** beyond install: concrete example prompts and
@@ -88,7 +88,7 @@ question lives).
 
 ### MCP Registry (`server.json`)
 - [ ] `mcp-publisher init` to scaffold `server.json`; set namespace
-      `io.github.<you>/vcf-mcp`, `$schema`, version matching the release.
+      `io.github.<username>/vcf-mcp`, `$schema`, version matching the release.
 - [ ] Add the required ownership-validation metadata (`mcpName` in a README
       mention / package label).
 - [ ] `mcp-publisher login github` then `mcp-publisher publish --dry-run`.
@@ -98,7 +98,7 @@ question lives).
       with annotations, the privacy section, and the run command.
 - [ ] Decide **cross-platform support.** Today's binary is Windows-only. MCPB
       bundles a binary/runtime; either ship per-OS bundles or document the
-      supported platform. Set up CI release builds for the OSes you commit to.
+      supported platform. Set up CI release builds for the supported OSes.
 - [ ] Validate the bundle loads in Claude Desktop's Extensions UI locally.
 
 ## Phase 3 — Submit
@@ -132,12 +132,12 @@ question lives).
 | Cross-platform release binaries | MCPB (depends on scope) | ☐ todo |
 | `SECURITY.md` (vuln contact) | recommended | ☐ todo |
 
-## Inputs I need from you
+## Open inputs / decisions
 
 1. **GitHub username/org** for the repo URL and `io.github.*` namespace.
 2. **Support/contact channel** for the privacy policy + form (email? GitHub
    issues?).
 3. **Which OSes** to support in the MCPB bundle (Windows only, or +macOS/Linux).
-4. **Logo/icon** (or I can generate a placeholder spec).
-5. Confirmation you're comfortable **listing a genomics tool publicly**, given
-   the health-data review — the architecture supports it, but it's your call.
+4. **Logo/icon** (a placeholder spec can be generated).
+5. Decision on **listing a genomics tool publicly**, given
+   the health-data review — the architecture supports it.

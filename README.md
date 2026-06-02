@@ -1,7 +1,7 @@
 # vcf-mcp
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that lets an
-AI assistant query bgzipped VCF files — your personal genome, a cohort sample,
+AI assistant query bgzipped VCF files — a personal genome, a cohort sample,
 anything in VCF format — through natural-language prompts. No `.tbi` index file
 required; the server builds one in memory at registration time.
 Built in Rust on top of [`noodles`](https://crates.io/crates/noodles) for VCF
@@ -14,7 +14,7 @@ must not be used for clinical diagnosis, treatment decisions, or any other
 purpose involving patient care. Output may be incomplete, incorrect, or
 out-of-date relative to the underlying VCF data. Always verify results against
 the source files and authoritative annotations before drawing biological
-conclusions. Use of this software is at your own risk; see the [LICENSE](LICENSE)
+conclusions. Use of this software is at the user's own risk; see the [LICENSE](LICENSE)
 for the full warranty disclaimer.
 
 ## What it does
@@ -35,7 +35,7 @@ Exposes ten tools to an MCP client:
 | `compare_samples` | Run the same query across multiple samples and merge per-sample results. |
 
 The tools return structured JSON. An MCP client like Claude Desktop calls them
-on demand as the model reasons about your prompts. **Zero-config startup is
+on demand as the model reasons about the prompts. **Zero-config startup is
 supported** — point Claude Desktop at the binary, then in a chat paste a VCF
 path (or a folder of VCFs) and ask Claude to register them. The server
 auto-detects genome build and persists registrations to a state file so they
@@ -46,10 +46,10 @@ survive restarts.
 ```bash
 git clone <repo> vcf-mcp && cd vcf-mcp
 cargo build --release
-# (Optional) generate a tabix index if your VCF doesn't have one:
-cargo run --release --example index_vcf -- /path/to/your.vcf.gz
-# Wire the binary into your MCP client (see "Claude Desktop" below).
-# No config file needed — just chat with Claude and paste your VCF path
+# (Optional) generate a tabix index if the VCF doesn't have one:
+cargo run --release --example index_vcf -- /path/to/sample.vcf.gz
+# Wire the binary into the MCP client (see "Claude Desktop" below).
+# No config file needed — point the MCP client at the binary and supply a VCF path
 # when prompted; the server registers it via add_sample.
 ```
 
@@ -63,7 +63,7 @@ cargo run --release --example index_vcf -- /path/to/your.vcf.gz
   from [rustup.rs](https://rustup.rs/).
 - An **MCP-capable client**. Tested with Claude Desktop on Windows.
 
-On Windows you'll need either the MSVC build tools or the GNU toolchain
+On Windows, either the MSVC build tools or the GNU toolchain is needed
 (`rustup target add x86_64-pc-windows-msvc` is the default).
 
 ## Build
@@ -74,7 +74,7 @@ cargo build --release
 
 The binary lands at `target/release/vcf-mcp` (or `.exe` on Windows).
 
-> If you have `CARGO_TARGET_DIR` set globally, the project's
+> If `CARGO_TARGET_DIR` is set globally, the project's
 > [`.cargo/config.toml`](.cargo/config.toml) tries to override it back to
 > `./target/`. Cargo's env var still wins over the config file though, so in a
 > shell that has the env set, either clear it
@@ -83,10 +83,10 @@ The binary lands at `target/release/vcf-mcp` (or `.exe` on Windows).
 
 ## Configure (optional)
 
-There are three ways to register samples; pick whichever fits your workflow:
+There are three ways to register samples; pick whichever fits the workflow:
 
 **1. In chat (recommended)** — say "add this VCF: D:\path\file.vcf.gz" and
-Claude calls `add_sample` for you. The server validates the file and remembers
+Claude calls `add_sample`. The server validates the file and remembers
 it. Registrations persist across server restarts via a small auto-managed
 state file:
 
@@ -96,7 +96,7 @@ state file:
 | macOS | `~/Library/Application Support/vcf-mcp/state.json` |
 | Windows | `%LOCALAPPDATA%\vcf-mcp\data\state.json` |
 
-You never edit this file directly; the server writes it. Override the location
+This file is written by the server, not edited directly. Override the location
 with `--state-file <path>` or disable persistence entirely with `--ephemeral`.
 
 **2. TOML bootstrap** — for an existing setup, or to seed several samples at
@@ -107,7 +107,7 @@ operations still work and persist to the state file. Example (also see
 
 ```toml
 [[samples]]
-name = "me"                                    # short identifier you'll use in prompts
+name = "me"                                    # short identifier used in prompts
 vcf_path = "person_genome_001.snp-indel.vcf.gz"  # absolute, or relative to this config file
 build = "GRCh38"                               # or "GRCh37"
 description = "Whole-genome sequencing, 2025-06-24"
@@ -117,7 +117,7 @@ description = "Whole-genome sequencing, 2025-06-24"
 `add_samples_from_folder`. Default cap 50 files, hard cap 200; see the tool
 reference below.
 
-Whichever path you choose, each VCF must be **bgzipped** (`.vcf.gz`). No
+Whichever path is chosen, each VCF must be **bgzipped** (`.vcf.gz`). No
 `.tbi` is required — the server builds the index in memory when the sample is
 registered.
 
@@ -130,15 +130,14 @@ vcf-mcp serve --check
 ### Building a `.tbi` index (optional)
 
 vcf-mcp builds the tabix index in memory on first registration when a `.tbi`
-isn't present, so you usually don't need to pre-index anything. If you'd
-prefer to write a `.tbi` to disk anyway (e.g. for use with `tabix` or
+isn't present, so pre-indexing is usually unnecessary. To write a `.tbi` to disk anyway (e.g. for use with `tabix` or
 `bcftools`):
 
 ```bash
-cargo run --release --example index_vcf -- /path/to/your.vcf.gz
+cargo run --release --example index_vcf -- /path/to/sample.vcf.gz
 ```
 
-This streams the file and writes `<your.vcf.gz>.tbi`. Throughput is roughly
+This streams the file and writes `<sample.vcf.gz>.tbi`. Throughput is roughly
 3 million records/second on a typical desktop; a 30× WGS file with ~12M
 variants indexes in under 5 seconds. vcf-mcp will use that file directly
 on next `add_sample` rather than rebuilding.
@@ -147,7 +146,7 @@ on next `add_sample` rather than rebuilding.
 
 Locate `claude_desktop_config.json`. The cleanest way is **Settings → Developer
 → Edit Config** from inside Claude Desktop — that button opens the file at
-whatever path your install actually uses (it differs between the standalone
+whatever path the install actually uses (it differs between the standalone
 download and the Microsoft Store / MSIX build on Windows).
 
 Add the `vcf-mcp` entry under `mcpServers` (merge with any existing entries —
@@ -174,7 +173,7 @@ or use forward slashes.
 
 **Restart Claude Desktop fully** — right-click the tray icon → Quit. Just
 closing the window leaves the process running, and the running process won't
-pick up the config change. On the Windows Store build you may need to manually
+pick up the config change. On the Windows Store build, it may be necessary to manually
 kill any lingering `claude.exe` processes:
 
 ```powershell
@@ -199,7 +198,7 @@ homozygous reference at both, which is the ε3/ε3 genotype).
 
 ## Tool reference
 
-All tools take a `sample` argument (the `name` from your config) and return
+All tools take a `sample` argument (the `name` from the config) and return
 JSON in the `text` field of an MCP `CallToolResult`. Coordinate conventions are
 **1-based inclusive** throughout, matching the VCF spec and command-line tools
 like `tabix`.
